@@ -1,0 +1,231 @@
+use std::env;
+use std::fs::File;
+use std::io::prelude::*;
+use std::path::Path;
+
+
+
+use ggez::*;
+//use ggez::event::{KeyCode, KeyMods};
+//use ggez::context::quit;
+use ggez::graphics::{self, Color};
+use ggez::nalgebra as na;
+//use ggez::glam::*;
+
+mod cpu;
+mod mmu;
+mod ppu;
+//mod apu;
+mod cpu_tables;
+
+
+const CPU_FREQUENCY : u32 = 4194304; // 4.2 MHz
+const FRAME_RATE: u32 = 60;
+const CYCLES_PER_FRAME: u32 = CPU_FREQUENCY / FRAME_RATE;
+
+const GB_SCREEN_DIM : u32 = 23040; // 160x144
+const SCREEN_UPSCALE_FACTOR : f32 = 5.0; // gameboy screen is super tiny, so we upscale it
+
+struct State {
+    dt: std::time::Duration,
+    pc : usize,
+    cpu : cpu::CPU,
+    ppu : ppu::PPU,
+    mmu : mmu::MMU,
+    current_instruction: u16,
+    delay : u64,
+    pos_x : f32
+}
+
+impl ggez::event::EventHandler for State {
+    fn update(&mut self, ctx: &mut Context) -> GameResult {
+        self.dt = timer::delta(ctx);
+		//let mmu_clone = self.mmu.clone();
+		//let updated_mmu = self.cpu.cycle(mmu_clone);
+		//self.mmu = updated_mmu;
+        //
+        for _ in 0..CYCLES_PER_FRAME {
+		    self.cpu.cycle(&mut self.mmu);
+        }
+
+        //println!("Test\n");
+        self.pos_x = self.pos_x % 800.0 + 1.0;
+        Ok(())
+    }
+
+    /*
+    fn key_down_event(&mut self, ctx: &mut Context, _keycode: KeyCode, _keymods: KeyMods, _repeat: bool) {
+        if _keycode == KeyCode::Escape {
+            ggez::context::quit(ctx);
+        }
+    }
+    */
+
+    fn draw(&mut self, ctx: &mut Context) -> GameResult {
+
+		let &mut gb_screen = self.ppu.render(&mut self.mmu);
+        
+        let screen_dimension : usize = gb_screen.len() * (SCREEN_UPSCALE_FACTOR as usize) * 4;
+		let mut screen_bitmap_rgba : Vec<u8> = vec![0; screen_dimension];
+
+		for i in 0..(gb_screen.len()) {
+
+            let four_pixels = gb_screen[i];
+
+            for j in (0..4).rev() {
+                let pixel = (four_pixels & (0b11 << (j*2))) >> (j*2);
+                let pixel_idx = 4*i+j;
+
+                match pixel {
+                    // the alleged color scheme
+                    0b00 => { // white 
+                              let mut white_color = 255;
+                              if (j % 2 == 0) {
+                                  white_color = 96;
+                              }
+                              screen_bitmap_rgba[pixel_idx+0] = white_color;
+                              screen_bitmap_rgba[pixel_idx+1] = white_color;
+                              screen_bitmap_rgba[pixel_idx+2] = white_color;
+                            },
+                    0b01 => { // light gray
+                              screen_bitmap_rgba[pixel_idx+0] = 192;
+                              screen_bitmap_rgba[pixel_idx+1] = 192;
+                              screen_bitmap_rgba[pixel_idx+2] = 192;
+                            },
+                    0b10 => { // dark gray
+                              screen_bitmap_rgba[pixel_idx+0] = 96;
+                              screen_bitmap_rgba[pixel_idx+1] = 96;
+                              screen_bitmap_rgba[pixel_idx+2] = 96;
+                            },
+                    0b11 => { // black
+                              screen_bitmap_rgba[pixel_idx+0] = 0;
+                              screen_bitmap_rgba[pixel_idx+1] = 0;
+                              screen_bitmap_rgba[pixel_idx+2] = 0;
+                            },
+
+                    _ => panic!("Invalid pixel value"),
+                }
+                // alpha channel
+                screen_bitmap_rgba[pixel_idx+3] = 255;
+            }
+
+		}
+
+
+        for i in 0..144 {
+            screen_bitmap_rgba[i*160*4] = 255;
+            screen_bitmap_rgba[i*160*4+1] = 255;
+            screen_bitmap_rgba[i*160*4+2] = 0;
+            screen_bitmap_rgba[i*160*4+3] = 255;
+        }
+
+        for i in 0..160 {
+            screen_bitmap_rgba[i*4] = 255;
+            screen_bitmap_rgba[i*4+1] = 255;
+            screen_bitmap_rgba[i*4+2] = 0;
+            screen_bitmap_rgba[i*4+3] = 255;
+        }
+
+
+		let screen_slice = &screen_bitmap_rgba[..];
+
+
+
+		//let screen : graphics::Image = ggez::graphics::Image::from_pixels(ctx, screen_slice, graphics::ImageFormat::Rgba8Unorm, 160, 144);
+        let screen : graphics::Image = ggez::graphics::Image::from_rgba8(ctx, 160, 144, screen_slice).unwrap();
+        graphics::draw(ctx, &screen, (na::Point2::new(0.0, 0.0),))?;
+
+
+
+        //let screen : graphics::Image = ggez::graphics::Image::new_canvas_image(ctx, graphics::ImageFormat::Rgba8Unorm, 160, 144, 1);
+
+        //let mut canvas = graphics::Canvas::from_image(ctx, screen, graphics::Color::from([1.0,0.0,0.2,1.0]),);
+        //let mut canvas = graphics::Canvas::from_frame(ctx, graphics::Color::from([1.0, 0.0, 0.0, 1.0]),);
+        //let my_dest = glam::vec2(100.0, 100.0);
+        //canvas.draw(&screen, graphics::DrawParam::default().dest(my_dest));
+
+		// actually puts stuff on the screen
+        //canvas.finish(ctx)?;
+        //ctx.gfx.present(&screen);
+        graphics::present(ctx)?;
+        Ok(())
+    }
+}
+
+
+//pub fn main() -> GameResult {
+pub fn main() {
+    let args: Vec<String> = env::args().collect();
+    let path = Path::new(&args[1]);
+    let display = path.display();
+    let mut cartridge = match File::open(&path) {
+        Err(why) => panic!("couldn't open {} : {}", display, why),
+        Ok(cartridge) => cartridge,
+    };
+    let mut byte_buffer = Vec::new();
+    cartridge.read_to_end(&mut byte_buffer);
+
+    let hex_values: Vec<String> = byte_buffer.iter()
+                                    .map(|byte| format!("{:02x}", byte))
+                                    .collect();
+    let hex_str = hex_values.join(" ");
+    println!("{}", hex_str);
+
+	let mut mmu = mmu::MMU::new();
+    let mut cpu = cpu::CPU::new();
+    let mut ppu = ppu::PPU::new();
+	//let apu = apu::APU::new(mmu_ref);
+
+	mmu.load_rom(byte_buffer);
+
+
+    //let state = State { dt: std::time::Duration::new(0, 0), pc : 0, cpu : cpu, ppu : ppu, mmu : mmu, current_instruction : 0, delay: 1, pos_x: 0.0};
+    let state = &mut State { dt: std::time::Duration::new(0, 0), pc : 0, cpu : cpu, ppu : ppu, mmu : mmu, current_instruction : 0, delay: 1, pos_x: 0.0};
+
+    let window_cfg : conf::WindowMode = conf::WindowMode {
+        width : 160.0,
+        height : 144.0,
+        //width : 160.0 * SCREEN_UPSCALE_FACTOR,
+        //height : 144.0 * SCREEN_UPSCALE_FACTOR,
+        maximized: false,
+        fullscreen_type: conf::FullscreenType::Windowed,
+        borderless: false,
+        min_width: 0.0,
+        max_width: 0.0,
+        min_height: 0.0,
+        max_height: 0.0,
+        resizable: false,
+        //visible: true,
+        //transparent: false,
+        //resize_on_scale_factor_change: false,
+        //logical_size: None,
+    };
+
+    /*
+    let cb = ggez::ContextBuilder::new("DeityGB", "RatioAeterna");
+    let (mut ctx, event_loop) = cb.build()?;
+    */
+
+
+    let c = conf::Conf::new();
+    let (ref mut ctx, ref mut event_loop) = ContextBuilder::new("CHIP8-EMU", "jasoncox")
+    .conf(c)
+    .build()
+    .unwrap();
+
+
+
+
+    graphics::set_default_filter(ctx, graphics::FilterMode::Nearest);
+    //let rect : graphics::Rect = graphics::Rect::new(0.0, 0.0, 160.0, 144.0);
+
+    //graphics::GraphicsContext::set_mode(&mut ctx.gfx, window_cfg);
+    graphics::set_mode(ctx, window_cfg);
+    //graphics::set_screen_coordinates(ctx, rect);
+    //ctx.gfx.set_window_title("Fierce Deity's GB");
+    graphics::set_window_title(ctx,"Fierce Deity's GB");
+
+    // run main loop
+    //event::run(ctx, event_loop, state);
+    event::run(ctx, event_loop, state).unwrap();
+}
