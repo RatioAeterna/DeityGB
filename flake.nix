@@ -30,6 +30,7 @@
 	    xorg.libXcursor
 	    xorg.libXrandr
 	    xorg.libXi
+	    libxkbcommon
             # Add other essential Rust tools as needed
           ];
         };

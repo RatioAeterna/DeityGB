@@ -22,17 +22,19 @@ impl PPU {
 
 
     // NOTE: VRAM ranges from 0x8000 to 0x9FFF
+    // NOTE: The GB screen is 160x144 pixels
+    // NOTE: Background itself is 256x256 pixels! 
 
 
-	pub fn new() -> PPU {
-		PPU {
-			// pixel data to be drawn to screen
+    pub fn new() -> PPU {
+        PPU {
+            // pixel data to be drawn to screen
             screen : [0; 5760],
             vblank : false,
             tilemap_start : 0x0000,
             tiledata_start : 0x0000,
-		}
-	}
+        }
+    }
     
     // TODO these should most likely NOT be public
 
@@ -51,14 +53,14 @@ impl PPU {
     pub fn inc_ly(&mut self, mmu_ref : &mut mmu::MMU) {
         let prev_val : u8 = mmu_ref.get_byte(0xFF44 as usize);
         let mut new_val : u8 = prev_val+1;
-        // TODO is this correct, or should it be 154?
         if (prev_val >= 153) {
             new_val = 0; 
             self.vblank = false;
         }
         else if (prev_val >= 144) {
             self.vblank = true;
-            // TODO trigger vblank by setting interrupt flag register
+            let interrupt_flag = mmu_ref.get_byte(0xFF0F);
+            mmu_ref.set_byte(0xFF0F, interrupt_flag | 0x01);  // Set bit 0 (VBLANK)
         }
         mmu_ref.set_byte(0xFF44 as usize, new_val);
     }
@@ -66,7 +68,6 @@ impl PPU {
     pub fn get_ly(&mut self, mmu_ref : &mut mmu::MMU) -> u8 {
         mmu_ref.get_byte(0xFF44 as usize)
     }
-
 
 
     // should return the OFFSET into the tile data
@@ -96,9 +97,9 @@ impl PPU {
         let x_offset = lx % 4;
         let mask = (0b11111100) << (x_offset*2);
         
-        println!("STUFF!! {}, {}, {}", (x_idx + 38*ly), x_idx, ly);
-        let original = self.screen[(x_idx + 38*ly) as usize];
-        self.screen[(x_idx + 38*ly) as usize] = (mask & original) | pixel_data;
+        println!("STUFF!! {}, {}, {}", (x_idx as usize + 40 * ly as usize), x_idx, ly);
+        let original = self.screen[(x_idx as usize + 40*ly as usize) as usize];
+        self.screen[(x_idx as usize + 40*ly as usize) as usize] = (mask & original) | pixel_data;
     }
 
 
@@ -106,7 +107,7 @@ impl PPU {
     /* Render a single line of the screen i.e., increment the scanline by ONE,
      * so calls 144 - 153 we're in VBLANK and not drawing anything */
 
-	pub fn render_line(&mut self, mmu_ref : &mut mmu::MMU)  {
+    pub fn render_line(&mut self, mmu_ref : &mut mmu::MMU)  {
         if self.vblank {
             self.inc_ly(mmu_ref);
         }

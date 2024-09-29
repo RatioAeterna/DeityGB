@@ -19,11 +19,7 @@ const CYCLES_PER_FRAME: u32 = CPU_FREQUENCY / FRAME_RATE;
 const GB_SCREEN_DIM : u32 = 23040; // 160x144
 const SCREEN_UPSCALE_FACTOR : f32 = 5.0; // gameboy screen is super tiny, so we upscale it
 
-
-
-
-
-#[macroquad::main("BasicShapes")]
+#[macroquad::main("Fierce Deity's GB")]
 async fn main() {
 
     let args: Vec<String> = env::args().collect();
@@ -42,12 +38,12 @@ async fn main() {
     let hex_str = hex_values.join(" ");
     println!("{}", hex_str);
 
-	let mut mmu = mmu::MMU::new();
+    let mut mmu = mmu::MMU::new();
     let mut cpu = cpu::CPU::new();
     let mut ppu = ppu::PPU::new();
-	//let apu = apu::APU::new(mmu_ref);
+    //let apu = apu::APU::new(mmu_ref);
 
-	mmu.load_rom(byte_buffer);
+    mmu.load_rom(byte_buffer);
 
     let fd_title : String = "Fierce Deity's GB".to_string();
     let conf = Conf {
@@ -68,7 +64,7 @@ async fn main() {
         accumulated_cycles -= 456;
 
         // PPU RENDERING
-		let mut gb_screen : [u8; 5760] = [0; 5760];
+	let mut gb_screen : [u8; 5760] = [0; 5760];
         ppu.render_line(&mut mmu);
         if ppu.reached_vblank() {
             gb_screen = *ppu.get_buffer();
@@ -77,9 +73,9 @@ async fn main() {
 
         //let screen_dimension : usize = gb_screen.len() * (SCREEN_UPSCALE_FACTOR as usize) * 4;
         let screen_dimension : usize = gb_screen.len() * 4 * 4;
-		let mut screen_bitmap_rgba : Vec<u8> = vec![0; screen_dimension];
+	let mut screen_bitmap_rgba : Vec<u8> = vec![0; screen_dimension];
 
-		for i in 0..(gb_screen.len()) {
+	for i in 0..(gb_screen.len()) {
 
             let four_pixels = gb_screen[i];
 
@@ -90,10 +86,6 @@ async fn main() {
                 match pixel {
                     // the alleged color scheme
                     0b00 => { // white
-                              let mut white_color = 96;
-                              if (j % 2 == 0) {
-                                  white_color = 96;
-                              }
                               screen_bitmap_rgba[pixel_idx+0] = 0xC4;
                               screen_bitmap_rgba[pixel_idx+1] = 0xCF;
                               screen_bitmap_rgba[pixel_idx+2] = 0xA1;
