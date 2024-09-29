@@ -11,8 +11,8 @@ pub struct MMU {
 	A000 	BFFF 	8KB External RAM 	In cartridge, switchable bank if any
 	C000 	CFFF 	4KB Work RAM (WRAM) bank 0 	
 	D000 	DFFF 	4KB Work RAM (WRAM) bank 1~N 	Only bank 1 in Non-CGB mode
+	^ Second half of WRAM: Switchable bank 1~7 in CGB mode
 
-	Switchable bank 1~7 in CGB mode
 	E000 	FDFF 	Mirror of C000~DDFF (ECHO RAM) 	Typically not used
 	FE00 	FE9F 	Sprite attribute table (OAM) 	
 	FEA0 	FEFF 	Not Usable 	
@@ -37,46 +37,48 @@ pub struct MMU {
 	pub memory : Vec<u8>, 
 }
 
+fn echo_ram_sub(addr: usize) -> usize {
+    addr - 0x2000
+}
+
+fn echo_ram(addr: usize) -> bool {
+    (0xE000..=0xFDFF).contains(&addr)
+}
 
 
 impl MMU {
 
-	pub fn new() -> MMU {
-		MMU {
-			//memory : [0 ; 0x10000],
-			memory : vec![0; 0x10000],
-		}
-	}
 
-    pub fn set_byte(&mut self, addr: usize, data : u8) {
+    pub fn new() -> MMU {
+        MMU {
+            memory : vec![0; 0x10000],
+        }
+    }
+
+    pub fn set_byte(&mut self, mut addr: usize, data : u8) {
+        if echo_ram(addr) { addr = echo_ram_sub(addr); }
         self.memory[addr] = data;
     }
-    pub fn get_byte(&self, addr: usize) -> u8 {
+
+    pub fn get_byte(&self, mut addr: usize) -> u8 {
+        if echo_ram(addr) { addr = echo_ram_sub(addr); }
         return self.memory[addr];
     }
 
-	pub fn enable_interrupts(&mut self) {
-		// TODO: Not sure if the whole bit should be set
-		self.memory[0xFFFF] = 0xFF;
-	}
+    pub fn enable_interrupts(&mut self) {
+        self.memory[0xFFFF] = 0xFF;
+    }
 
-	pub fn disable_interrupts(&mut self) {
-		// TODO: Not sure if the whole bit should be set
-		self.memory[0xFFFF] = 0x00;
-	}
+    pub fn disable_interrupts(&mut self) {
+        self.memory[0xFFFF] = 0x00;
+    }
 
-
-	
-
-	pub fn load_rom(&mut self, rom_data : Vec<u8>) {
-		// TODO assuming, for now, that ROM data leq than 4000 bytes
-		for i in 0..(rom_data.len()) {
-			self.memory[i] = rom_data[i];
-			println!("{:#02x}", rom_data[i]);
-		}
-		println!("=================================");
-
-	}
-
-
+    pub fn load_rom(&mut self, rom_data : Vec<u8>) {
+        // TODO assuming, for now, that ROM data leq than 0x4000 bytes
+        for i in 0..(rom_data.len()) {
+                self.memory[i] = rom_data[i];
+                println!("{:#02x}", rom_data[i]);
+        }
+        println!("=================================");
+    }
 }

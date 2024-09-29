@@ -57,10 +57,16 @@ async fn main() {
 
     loop {
 
-        // first the cpu runs, then we 
+        // First the CPU runs, then we wait until 456 cycles have passed, corresponding to the time it takes
+        // for the PPU to render a single scanline (one line of pixels).
+        // After accumulating 456 cycles, we render a single line with the PPU.
+        // Once 144 lines are rendered, we enter VBlank, where we can safely copy the screen buffer to display it.
         while accumulated_cycles <= 456 {
 		    accumulated_cycles += cpu.cycle(&mut mmu) as u16;
         }
+        // NOTE: each scanline takes exactly 456 CPU cycles to render.
+        // This is based on a frame rate of 60FPS, and therefore 70224 cycles per frame
+        // given 154 lines.
         accumulated_cycles -= 456;
 
         // PPU RENDERING
