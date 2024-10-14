@@ -58,6 +58,12 @@ impl MMU {
     pub fn set_byte(&mut self, mut addr: usize, data : u8) {
         if echo_ram(addr) { addr = echo_ram_sub(addr); }
         self.memory[addr] = data;
+
+    }
+
+    // check if we have we set the 'BOOT' reg, i.e., at the end of the boot sequence
+    pub fn get_boot(&mut self) -> u8 {
+        self.memory[0xFF50]
     }
 
     pub fn get_byte(&self, mut addr: usize) -> u8 {
@@ -71,6 +77,24 @@ impl MMU {
 
     pub fn disable_interrupts(&mut self) {
         self.memory[0xFFFF] = 0x00;
+    }
+
+    pub fn map_cartridge_nintendo_logo(&mut self) {
+        // The Nintendo logo bytes
+        let nintendo_logo: [u8; 48] = [
+            0xCE, 0xED, 0x66, 0x66, 0xCC, 0x0D, 0x00, 0x0B, 0x03, 0x73, 0x00, 0x83, 0x00, 0x0C, 0x00, 0x0D,
+            0x00, 0x08, 0x11, 0x1F, 0x88, 0x89, 0x00, 0x0E, 0xDC, 0xCC, 0x6E, 0xE6, 0xDD, 0xDD, 0xD9, 0x99,
+            0xBB, 0xBB, 0x67, 0x63, 0x6E, 0x0E, 0xEC, 0xCC, 0xDD, 0xDC, 0x99, 0x9F, 0xBB, 0xB9, 0x33, 0x3E
+        ];
+
+        let nintendo_logo_r: [u8; 8] = [0x3C, 0x42, 0xB9, 0xA5, 0xB9, 0xA5, 0x42, 0x3C];
+
+        // Copy the logo into the memory starting at address 0x0104
+        self.memory[0x0104..0x0104 + nintendo_logo.len()].copy_from_slice(&nintendo_logo);
+        self.memory[0x0134..0x0134 + nintendo_logo_r.len()].copy_from_slice(&nintendo_logo_r);
+
+        // need to set the checksum, last thing checked in the boot rom
+        self.memory[0x014D] = 0x2F;
     }
 
     pub fn load_rom(&mut self, rom_data : Vec<u8>) {

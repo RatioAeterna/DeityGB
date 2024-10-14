@@ -57,7 +57,7 @@ impl PPU {
             new_val = 0; 
             self.vblank = false;
         }
-        else if (prev_val >= 144) {
+        else if (prev_val >= 143) {
             self.vblank = true;
             let interrupt_flag = mmu_ref.get_byte(0xFF0F);
             mmu_ref.set_byte(0xFF0F, interrupt_flag | 0x01);  // Set bit 0 (VBLANK)
@@ -70,21 +70,46 @@ impl PPU {
     }
 
 
-    // should return the OFFSET into the tile data
+    // should return the ID of the particular tile that we are looking at
     // here x and y are the TILE BYTE INDICES on the 32x32 byte tile map
-    pub fn tilemap_fetch_offset(&mut self, x_tile_byte : u8, y_tile_byte : u8, mmu_ref : &mut mmu::MMU) -> u8 {
+    pub fn tilemap_fetch_id(&mut self, x_tile_num : usize, y_tile_num : usize, mmu_ref : &mut mmu::MMU) -> u8 {
         // we're fetching the ONE BYTE of the TILE that the CURRENT PIXEL is in
-        mmu_ref.get_byte(self.tilemap_start + ((x_tile_byte + y_tile_byte*32) as usize))
+        mmu_ref.get_byte(self.tilemap_start + x_tile_num + y_tile_num*32)
     }
 
     // should return a SINGLE PIXEL of tile data
     // here x and y are the literal pixel coordinates... the tiles are distributed evenly across
     // the screen so we know exactly what pixel of a tile a particular pixel on the screen is.
-    pub fn tiledata_fetch_pixel(&mut self, x: u8, y: u8, offset : u8, mmu_ref : &mut mmu::MMU) -> u8 {
+    pub fn tiledata_fetch_pixel(&mut self, x: usize, y: usize, tile_id: usize, mmu_ref : &mut mmu::MMU) -> u8 {
+
+        // Tells us "how many bytes into the tile data do we go, for the full data of this particular
+        // tile?"
+        let tile_offset = 16 * tile_id;
+
+        // First, we answer this question: "What row of the tile do we care about"
+        let row = y % 8;
+
+        // Fetch the ROW PAIR that you need. 
+        let tile_row_part_1 = mmu_ref.get_byte(self.tiledata_start + tile_offset + 2*row);
+        let tile_row_part_2 = mmu_ref.get_byte(self.tiledata_start + tile_offset + 2*row+1);
+
         // TODO assuming unsigned offsets for now
+
+        // Next, we answer this question: "What column of that row do we care about"
+        let col = x % 8;
+        let pixel_lower_bit = (tile_row_part_1 & (0b10000000 >> col)) >> (7 - col);
+        let pixel_upper_bit = (tile_row_part_2 & (0b10000000 >> col)) >> (7 - col);
+        let pixel_value = (pixel_upper_bit << 1) | pixel_lower_bit;
+
+        // NOTE: these are ALL of the form 0b000000XX (i.e., the actual pixel value stored at the
+        // end of the byte)
+        return pixel_value;
+        /*
+
         // fetch the HALF-ROW that this PIXEL is on, zero out the other pixels, return it
-        let tile_half_row = mmu_ref.get_byte(self.tiledata_start + (offset + ((x%8)/4) + (y%8)*2) as usize);
+        let tile_half_row = mmu_ref.get_byte(self.tiledata_start + tile_offset + (x%8)/4 + (y%8)*2);
         return tile_half_row;
+        */
     }
 
     
@@ -92,14 +117,22 @@ impl PPU {
     // i.e., it should preserve its ordering in the byte.
     // e.g., 0b00001100 -> "the third pixel is black"
     pub fn set_screen_pixel(&mut self, lx : u8, ly : u8, pixel_data : u8) { 
-        // compute x byte
-        let x_idx = lx / 4;
+        // compute which byte offset into the screen buffer corresponds to 'lx'
+        // divide by four because there are four pixels per byte
+        let x_idx = lx / 4; 
+        // "what is the offset into the four pixel cluster of the pixel in
+        // question?"
         let x_offset = lx % 4;
-        let mask = (0b11111100) << (x_offset*2);
-        
-        println!("STUFF!! {}, {}, {}", (x_idx as usize + 40 * ly as usize), x_idx, ly);
+        // shift by 0, 2, 4, or 6
+        let mask = (0b11111100) << ((3-x_offset)*2);
+        // we also gotta correspondingly shift the raw pixel color into position
+        let shifted_pixel_data = pixel_data << ((3-x_offset)*2);
+
+        // NOTE: The reason we keep using '40' for stuff here is that there are 4 pixels per byte,
+        // and 160 pixels per "row" of the GB screen, so we have 160/4 = 40 bytes per "row"
+        //println!("STUFF!! {}, {}, {}", (x_idx as usize + 40 * ly as usize), x_idx, ly);
         let original = self.screen[(x_idx as usize + 40*ly as usize) as usize];
-        self.screen[(x_idx as usize + 40*ly as usize) as usize] = (mask & original) | pixel_data;
+        self.screen[(x_idx as usize + 40*ly as usize) as usize] = (mask & original) | shifted_pixel_data;
     }
 
 
@@ -110,9 +143,13 @@ impl PPU {
     pub fn render_line(&mut self, mmu_ref : &mut mmu::MMU)  {
         if self.vblank {
             self.inc_ly(mmu_ref);
+            //println!("VBLANK!");
+            return;
         }
+        //println!("====================");
 		
         let scy = self.get_scy(mmu_ref);
+        println!("SCY: {}", scy);
         let scx = self.get_scx(mmu_ref);
 
         let lcdc = self.get_lcdc(mmu_ref);
@@ -131,12 +168,12 @@ impl PPU {
             // get the actual byte that we want
 
             // first, index into the tilemap using scx and scy
-            let offset : u8 = self.tilemap_fetch_offset(scx + (lx / 8), scy + (ly / 8), mmu_ref);
-            let pixel_data : u8 = self.tiledata_fetch_pixel(lx, ly, offset, mmu_ref);
+            let tile_id : u8 = self.tilemap_fetch_id(((scx + lx) / 8) as usize, ((scy + ly) / 8) as usize, mmu_ref);
+            let pixel_data : u8 = self.tiledata_fetch_pixel(lx as usize, ly as usize, tile_id as usize, mmu_ref);
             self.set_screen_pixel(lx, ly, pixel_data); // sets the actual pixel into the screen 
         }
         self.inc_ly(mmu_ref);
-	}
+    }
 
 
     pub fn reached_vblank(&mut self) -> bool {

@@ -31,7 +31,6 @@ fn set_flag(flags: &mut u8, bit: u8, val: bool) {
 
 
 
-
 fn ld_dec(mmu_ref : &mut mmu::MMU, r1 : &mut u16, r2 : u8) {
 	mmu_ref.set_byte(*r1 as usize, r2);
 	(*r1).wrapping_sub(1);
@@ -119,6 +118,36 @@ fn dec_reg(r1 : u8, flags: &mut u8) -> u8 {
 
     println!("REG AFTER DEC REG: {:#02x}", res);
     println!("FLAGS AFTER DEC REG: {:b}", *flags);
+    res
+}
+
+// subtracts the value of r2 from r1, returns this value (in order to set r1 in the CPU), sets flags
+// TODO should we just make this mutate r1 (aka 'a')? Cleaner design?
+fn sub_reg(r1: u8, r2: u8, flags: &mut u8) -> u8 {
+    let res = r1.wrapping_sub(r2);
+
+    let h_flag = (r1 & 0x0F) < (r2 & 0x0F);
+
+    set_flag(flags, ZERO, res==0);
+    set_flag(flags, SUB, true);
+    set_flag(flags, HC, h_flag);
+    set_flag(flags, CARRY, r2 > r1);
+    res
+}
+// TODO same concern here
+fn add_reg(r1: u8, r2: u8, flags: &mut u8) -> u8 {
+    let res = r1.wrapping_add(r2);
+
+    // Check if there is a half-carry (carry from bit 3 to bit 4)
+    let h_flag = ((r1 & 0x0F) + (r2 & 0x0F)) > 0x0F;
+
+    // Check if there is a carry (sum > 255)
+    let carry_flag = (r1 as u16 + r2 as u16) > 0xFF;
+
+    set_flag(flags, ZERO, res==0);
+    set_flag(flags, SUB, false);
+    set_flag(flags, HC, h_flag);
+    set_flag(flags, CARRY, carry_flag);
     res
 }
 
@@ -380,15 +409,15 @@ impl CPU  {
 	}
 
     fn jump_relative(&mut self, a8 : u8) {
-        //println!("jr a8: {:#02x}", a8);
+        println!("jr a8: {:#02x}", a8);
         let offset = ternary!(((a8 & 0b10000000) > 0), twos_complement(a8), a8 as i16);
         if offset < 0 {
             self.pc = self.pc.wrapping_sub(offset.abs() as u16);
-            //println!("jr offset negative! {:#04x}", offset.abs());
+            println!("jr offset negative! {:#04x}", offset.abs());
         }
         else {
             self.pc = self.pc.wrapping_add(offset as u16);
-            //println!("jr offset positive! {:#04x}", offset.abs());
+            println!("jr offset positive! {:#04x}", offset.abs());
         }
     }
 
@@ -416,8 +445,10 @@ impl CPU  {
 
     // performs a F/D/E/WB cycle
     pub fn cycle(&mut self, mmu_ref : &mut mmu::MMU) -> u8 {
+        if self.halt_flag {
+            return 0;
+        }
         let next_opcode : u8 = self.fetch(self.pc, mmu_ref);
-
         // returns the number of cycles for the current instruction
         self.decode_execute(next_opcode, mmu_ref)     
     }
@@ -768,19 +799,28 @@ impl CPU  {
 				0x12 => mmu_ref.set_byte(self.get_de() as usize, self.a),
 				0x13 => self.set_de(self.get_de()+1),
 
-                0x17 => self.a = rla(self.a, &mut self.f),
+				0x15 => self.d = dec_reg(self.d, &mut self.f),
 
-                0x18 => self.jump_relative(n),
+                                0x16 => self.d = n,
 
-                0x1E => self.e = n,
+                                0x17 => self.a = rla(self.a, &mut self.f),
 
-				0x20 => if (self.f & 0b10000000) == 0 {self.jump_relative(n);}, // JMP if non-zero,
+                                0x18 => self.jump_relative(n),
+
+
+                                0x1D => { self.e = dec_reg(self.e, &mut self.f); },
+
+                                0x1E => self.e = n,
+
+				0x20 => if (self.f & 0b10000000) == 0 {self.jump_relative(n); println!("NOT ZERO!");} else {println!("ZERO!");}, // JMP if non-zero,
 				0x21 => ld_word(&mut self.h, &mut self.l, nn),
 
 				0x22 => { let hl_val = self.get_hl(); 
                           mmu_ref.set_byte(hl_val as usize, self.a);
                           self.set_hl(hl_val.wrapping_add(1)); },
 				0x23 => self.set_hl(self.get_hl()+1),
+
+                                0x24 => self.h = inc_reg(self.h, &mut self.f),
 
 
 				0x28 => if (self.f & 0b10000000) != 0 {self.jump_relative(n);}, // JMP if zero,
@@ -792,24 +832,19 @@ impl CPU  {
 
 				0x31 => ld_word(&mut self.s, &mut self.p, nn),
 				0x32 => { let hl_val = self.get_hl(); 
-                          //println!("(PRE) HL REGISTER!!! {:#04x}", hl_val);
-                          mmu_ref.set_byte(hl_val as usize, self.a);
-                          self.set_hl(hl_val.wrapping_sub(1));
-                          //println!("HL REGISTER!!! {:#04x}", self.get_hl());
-                          },
+                                  //println!("(PRE) HL REGISTER!!! {:#04x}", hl_val);
+                                  mmu_ref.set_byte(hl_val as usize, self.a);
+                                  self.set_hl(hl_val.wrapping_sub(1));
+                                  //println!("HL REGISTER!!! {:#04x}", self.get_hl());
+                                  },
+
 				0x33 => self.set_sp(self.get_sp()+1),
 
-                0x3D => {  self.a = dec_reg(self.a, &mut self.f);
-                           println!("A after dec_reg: {:#02x}", self.a);
-                           println!("zero flag after dec A! {:b}", (self.f & 0b10000000));
-                                                                        },
-
-
-
-
+                                0x3D => {  self.a = dec_reg(self.a, &mut self.f);
+                                           println!("A after dec_reg: {:#02x}", self.a);
+                                           println!("zero flag after dec A! {:b}", (self.f & 0b10000000));
+                                                                                        },
 				0x3E => self.a = n,
-
-
 
 				0x7F => self.a = self.a,
 				0x78 => self.a = self.b,
@@ -892,7 +927,11 @@ impl CPU  {
 				0x7D => self.a = self.l,
 				0x7E => self.a = mmu_ref.get_byte(self.get_hl() as usize),
 				0x7F => self.a = self.a,
+
+
+                                0x86 => self.a = add_reg(self.a, mmu_ref.get_byte(self.get_hl() as usize), &mut self.f),
 				
+                                0x90 => self.a = sub_reg(self.a, self.b, &mut self.f),
 
 
 				0xEA => mmu_ref.set_byte(self.l_e_word_conversion(nn) as usize, self.a),
@@ -927,6 +966,8 @@ impl CPU  {
 				//0xB6 => or(&mut self.a, mmu_ref.get_byte(&mut self.get_hl() as usize), &mut self.f),
 
 				0xB7 => self.f = ternary!(self.a == 0, 0b10000000, 0b00000000), 
+
+                                0xBE => compare(self.a, mmu_ref.get_byte(self.get_hl() as usize), &mut self.f),
 
 
                 0xC1 => {let bc_val = self.stack_pop(mmu_ref); self.set_bc(bc_val);},
@@ -972,14 +1013,30 @@ impl CPU  {
 				0xFE => compare(self.a, n, &mut self.f),
 
 
-				_ => {
-					panic!("Error: Invalid opcode!");
+				_ => {    panic!(
+        "Error: Invalid opcode: 0x{:02X} (CB Prefix: {})", 
+        opcode, 
+        if cb_prefix { "on" } else { "off" }
+    );
+                                    panic!(
+                                        "Error: Invalid opcode: 0x{:02X} (CB Prefix: {})", 
+                                        opcode, 
+                                        if cb_prefix { "on" } else { "off" }
+                                    );
 				}
 			}
 		
 		}
         if !skip_increment {
 		    self.pc += instruction_size as u16;
+        }
+
+        // TODO have an actual conditional for "has_game_rom"
+        // maybe we don't even need the flag
+        //if mmu_ref.get_boot() && !mmu.has_game_rom() {
+        if (mmu_ref.get_boot() != 0) && true {
+            self.halt_flag = true;
+            // TODO set pc to 0x0100
         }
         /*
 		self.cycles_to_ei -= 1;
