@@ -104,12 +104,6 @@ impl PPU {
         // NOTE: these are ALL of the form 0b000000XX (i.e., the actual pixel value stored at the
         // end of the byte)
         return pixel_value;
-        /*
-
-        // fetch the HALF-ROW that this PIXEL is on, zero out the other pixels, return it
-        let tile_half_row = mmu_ref.get_byte(self.tiledata_start + tile_offset + (x%8)/4 + (y%8)*2);
-        return tile_half_row;
-        */
     }
 
     
@@ -149,13 +143,17 @@ impl PPU {
         //println!("====================");
 		
         let scy = self.get_scy(mmu_ref);
-        println!("SCY: {}", scy);
+        //println!("SCY: {}", scy);
         let scx = self.get_scx(mmu_ref);
 
         let lcdc = self.get_lcdc(mmu_ref);
 
-        self.tilemap_start = ternary!((lcdc & 0b00010000) != 0, 0x8000, 0x8800);
-        self.tiledata_start = ternary!((lcdc & 0b00001000) != 0, 0x9800, 0x9C00);
+        self.tilemap_start = ternary!((lcdc & 0b00001000) != 0, 0x9C00, 0x9800);
+        self.tiledata_start = ternary!((lcdc & 0b00010000) != 0, 0x8000, 0x8800);
+
+        println!("Tilemap Start: {:#06X}, Tiledata Start: {:#06X}", self.tilemap_start, self.tiledata_start);
+
+
 
         let ly : u8 = self.get_ly(mmu_ref);
 
@@ -169,7 +167,7 @@ impl PPU {
 
             // first, index into the tilemap using scx and scy
             let tile_id : u8 = self.tilemap_fetch_id(((scx + lx) / 8) as usize, ((scy + ly) / 8) as usize, mmu_ref);
-            let pixel_data : u8 = self.tiledata_fetch_pixel(lx as usize, ly as usize, tile_id as usize, mmu_ref);
+            let pixel_data : u8 = self.tiledata_fetch_pixel((scx + lx) as usize, (scy + ly) as usize, tile_id as usize, mmu_ref);
             self.set_screen_pixel(lx, ly, pixel_data); // sets the actual pixel into the screen 
         }
         self.inc_ly(mmu_ref);

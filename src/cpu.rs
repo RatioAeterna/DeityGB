@@ -101,7 +101,7 @@ fn inc_reg(r1 : u8, flags : &mut u8) -> u8 {
 
 // decrements 8 bit register by 1, returns it, sets flags
 fn dec_reg(r1 : u8, flags: &mut u8) -> u8 {
-    println!("REG IN DEC REG: {:#02x}", r1);
+    //println!("REG IN DEC REG: {:#02x}", r1);
     let mut z_flag = false;
     let mut h_flag = false;
 
@@ -116,8 +116,8 @@ fn dec_reg(r1 : u8, flags: &mut u8) -> u8 {
     set_flag(flags, SUB, true);
     set_flag(flags, HC, h_flag);
 
-    println!("REG AFTER DEC REG: {:#02x}", res);
-    println!("FLAGS AFTER DEC REG: {:b}", *flags);
+    //println!("REG AFTER DEC REG: {:#02x}", res);
+    //println!("FLAGS AFTER DEC REG: {:b}", *flags);
     res
 }
 
@@ -153,7 +153,7 @@ fn add_reg(r1: u8, r2: u8, flags: &mut u8) -> u8 {
 
 
 fn compare(r1 : u8, r2 : u8, flags: &mut u8) {
-    println!("COMPARE a val to other val {:#02x}, {:#02x} ", r1, r2);
+    //println!("COMPARE a val to other val {:#02x}, {:#02x} ", r1, r2);
 
     let mut z_flag = false;
     let mut h_flag = false;
@@ -409,15 +409,15 @@ impl CPU  {
 	}
 
     fn jump_relative(&mut self, a8 : u8) {
-        println!("jr a8: {:#02x}", a8);
+        //println!("jr a8: {:#02x}", a8);
         let offset = ternary!(((a8 & 0b10000000) > 0), twos_complement(a8), a8 as i16);
         if offset < 0 {
             self.pc = self.pc.wrapping_sub(offset.abs() as u16);
-            println!("jr offset negative! {:#04x}", offset.abs());
+            //println!("jr offset negative! {:#04x}", offset.abs());
         }
         else {
             self.pc = self.pc.wrapping_add(offset as u16);
-            println!("jr offset positive! {:#04x}", offset.abs());
+            //println!("jr offset positive! {:#04x}", offset.abs());
         }
     }
 
@@ -486,7 +486,7 @@ impl CPU  {
 		// pre-emptive execution to save space below
 		//println!("{}", self.pc);
 
-		println!("OPCODE {}{:#02x}. PC: {:#04x}", if cb_prefix { "CB " } else { "" }, opcode, if cb_prefix { self.pc - 1 } else {self.pc});
+		//println!("OPCODE {}{:#02x}. PC: {:#04x}", if cb_prefix { "CB " } else { "" }, opcode, if cb_prefix { self.pc - 1 } else {self.pc});
 
 		let nn = self.next_word(self.pc+1, mmu_ref);
 		let n = self.fetch(self.pc+1, mmu_ref);
@@ -841,8 +841,8 @@ impl CPU  {
 				0x33 => self.set_sp(self.get_sp()+1),
 
                                 0x3D => {  self.a = dec_reg(self.a, &mut self.f);
-                                           println!("A after dec_reg: {:#02x}", self.a);
-                                           println!("zero flag after dec A! {:b}", (self.f & 0b10000000));
+                                           //println!("A after dec_reg: {:#02x}", self.a);
+                                           //println!("zero flag after dec A! {:b}", (self.f & 0b10000000));
                                                                                         },
 				0x3E => self.a = n,
 
