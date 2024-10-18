@@ -101,6 +101,22 @@ impl PPU {
         let pixel_upper_bit = (tile_row_part_2 & (0b10000000 >> col)) >> (7 - col);
         let pixel_value = (pixel_upper_bit << 1) | pixel_lower_bit;
 
+        /*
+        if(pixel_value == 0b00000011) {
+            println!("DARK PIXEL!!!! {} {}, tile_id: {}. {} {}", x, y, tile_id, pixel_upper_bit, pixel_lower_bit); 
+        }
+        else {
+            println!("TILE_ID: {}.... {} {}", tile_id, pixel_upper_bit, pixel_lower_bit);
+        }
+
+        if(tile_id == 33) {
+            println!("Printing TILE 31!!");
+            for i in 0..16 {
+                println!("0b{:08b}", mmu_ref.get_byte(self.tiledata_start + tile_offset + i));
+            }
+        }
+        */
+
         // NOTE: these are ALL of the form 0b000000XX (i.e., the actual pixel value stored at the
         // end of the byte)
         return pixel_value;
@@ -151,7 +167,7 @@ impl PPU {
         self.tilemap_start = ternary!((lcdc & 0b00001000) != 0, 0x9C00, 0x9800);
         self.tiledata_start = ternary!((lcdc & 0b00010000) != 0, 0x8000, 0x8800);
 
-        println!("Tilemap Start: {:#06X}, Tiledata Start: {:#06X}", self.tilemap_start, self.tiledata_start);
+        //println!("Tilemap Start: {:#06X}, Tiledata Start: {:#06X}", self.tilemap_start, self.tiledata_start);
 
 
 

@@ -29,7 +29,44 @@ fn set_flag(flags: &mut u8, bit: u8, val: bool) {
     }
 }
 
+#[inline]
+fn get_flag(flags: &mut u8, bit: u8) -> bool {
+    (*flags & (1 << bit)) != 0
+}
 
+
+
+fn rra(a: &mut u8, flags: &mut u8) {
+    let carry_bit = *a & 0x01; // Get the rightmost bit (bit 0)
+    let old_carry = get_flag(flags, CARRY) as u8; // Get the current carry flag
+
+    *a = (*a >> 1) | (old_carry << 7); // Rotate right through carry
+
+    set_flag(flags, ZERO, false);  // Z flag is not affected
+    set_flag(flags, SUB, false);   // N flag is always cleared
+    set_flag(flags, HC, false);    // H flag is always cleared
+    set_flag(flags, CARRY, carry_bit != 0); // C flag is set to the old bit 0
+}
+
+fn rrca(a: &mut u8, flags: &mut u8) {
+    let carry_bit = *a & 0x01; // Get the rightmost bit (bit 0)
+    *a = (*a >> 1) | (carry_bit << 7); // Rotate right and wrap bit 0 to bit 7
+
+    set_flag(flags, ZERO, false);  // Z flag is not affected
+    set_flag(flags, SUB, false);   // N flag is always cleared
+    set_flag(flags, HC, false);    // H flag is always cleared
+    set_flag(flags, CARRY, carry_bit != 0); // C flag is set to the value of the old bit 0
+}
+
+fn rlca(a: &mut u8, flags: &mut u8) {
+    let carry_bit = (*a & 0x80) >> 7; // Get the leftmost bit (bit 7)
+    *a = (*a << 1) | carry_bit;       // Rotate left and wrap bit 7 to bit 0
+
+    set_flag(flags, ZERO, false);     // Z flag is not affected
+    set_flag(flags, SUB, false);      // N flag is always cleared
+    set_flag(flags, HC, false);       // H flag is always cleared
+    set_flag(flags, CARRY, carry_bit != 0); // C flag is set to the value of the old bit 7
+}
 
 fn ld_dec(mmu_ref : &mut mmu::MMU, r1 : &mut u16, r2 : u8) {
 	mmu_ref.set_byte(*r1 as usize, r2);
@@ -80,19 +117,19 @@ fn or(r1 : &mut u8, r2 : u8, flags: &mut u8) {
 	*flags = ternary!(*r1 == 0, 0b10000000, 0b00000000);
 }
 
-fn inc_reg(r1 : u8, flags : &mut u8) -> u8 {
-    let mut z_flag = false;
-    let mut h_flag = false;
-
+// increment 8 bit register by 1, returns it, sets flags
+fn inc_reg(r1: u8, flags: &mut u8) -> u8 {
     let res = r1.wrapping_add(1);
 
-    if res == 0 {
-        z_flag = true;
-    }
-    h_flag = (r1 & 0xF) == 0xF;
+    // Zero flag: set if result is 0
+    let z_flag = res == 0;
+    
+    // Half Carry flag: set if there's a carry from bit 3 to bit 4
+    let h_flag = (r1 & 0xF) == 0xF;
 
+    // Set flags
     set_flag(flags, ZERO, z_flag);
-    set_flag(flags, SUB, false);
+    set_flag(flags, SUB, false); // Always cleared for INC
     set_flag(flags, HC, h_flag);
 
     res
@@ -148,8 +185,46 @@ fn add_reg(r1: u8, r2: u8, flags: &mut u8) -> u8 {
     set_flag(flags, SUB, false);
     set_flag(flags, HC, h_flag);
     set_flag(flags, CARRY, carry_flag);
+
     res
 }
+
+fn adc_reg(r1: u8, r2: u8, flags: &mut u8) -> u8 {
+    let carry = get_flag(flags, CARRY) as u8;  // Get the carry flag (1 if set, 0 if not)
+    let res = r1.wrapping_add(r2).wrapping_add(carry);
+
+    // Check if there is a half-carry (carry from bit 3 to bit 4, with carry included)
+    let h_flag = ((r1 & 0x0F) + (r2 & 0x0F) + carry) > 0x0F;
+
+    // Check if there is a carry (sum > 255, with carry included)
+    let carry_flag = (r1 as u16 + r2 as u16 + carry as u16) > 0xFF;
+
+    set_flag(flags, ZERO, res == 0);
+    set_flag(flags, SUB, false);  // ADC doesn't set the subtraction flag
+    set_flag(flags, HC, h_flag);
+    set_flag(flags, CARRY, carry_flag);
+
+    res
+}
+
+
+fn add_double_regs(r1: u16, r2: u16, flags: &mut u8) -> u16 {
+    let result = r1.wrapping_add(r2);
+
+    // Check for Half Carry: If there's a carry from bit 11 to bit 12
+    let half_carry = ((r1 & 0x0FFF) + (r2 & 0x0FFF)) > 0x0FFF;
+
+    // Check for Carry: If the result is larger than 16 bits
+    let carry = (r1 as u32 + r2 as u32) > 0xFFFF;
+
+    // Set flags
+    set_flag(flags, SUB, false);       // Clear Subtract flag
+    set_flag(flags, HC, half_carry);   // Set Half Carry flag if there's a carry from bit 11
+    set_flag(flags, CARRY, carry);     // Set Carry flag if the result overflows 16 bits
+
+    result
+}
+
 
 
 fn compare(r1 : u8, r2 : u8, flags: &mut u8) {
@@ -486,7 +561,7 @@ impl CPU  {
 		// pre-emptive execution to save space below
 		//println!("{}", self.pc);
 
-		//println!("OPCODE {}{:#02x}. PC: {:#04x}", if cb_prefix { "CB " } else { "" }, opcode, if cb_prefix { self.pc - 1 } else {self.pc});
+		println!("OPCODE {}{:#02x}. PC: {:#04x}", if cb_prefix { "CB " } else { "" }, opcode, if cb_prefix { self.pc - 1 } else {self.pc});
 
 		let nn = self.next_word(self.pc+1, mmu_ref);
 		let n = self.fetch(self.pc+1, mmu_ref);
@@ -780,86 +855,102 @@ impl CPU  {
 				0x04 => self.b = inc_reg(self.b, &mut self.f),
 				0x05 => self.b = dec_reg(self.b, &mut self.f),
 				0x06 => self.b = n,
-				//0x07 => 
-				//0x08 => mmu_ref.set_word(nn as usize, self.get_sp()),
-
-
-				//0x09 => 
-
+				0x07 => rlca(&mut self.a, &mut self.f),
+				0x08 => mmu_ref.set_word(nn as usize, self.get_sp()),
+                                0x09 => {
+                                    let hl = self.get_hl();
+                                    let bc = self.get_bc();
+                                    let new_hl = add_double_regs(hl, bc, &mut self.f);
+                                    self.set_hl(new_hl);
+                                },
+				0x0A => self.a = mmu_ref.get_byte(self.get_bc() as usize),
+                                0x0B => {
+                                    let bc = self.get_bc();
+                                    let new_bc = bc.wrapping_sub(1);
+                                    self.set_bc(new_bc);
+                                },
 				0x0C => self.c = inc_reg(self.c, &mut self.f),
-				0x0D => { self.c = dec_reg(self.c, &mut self.f); println!("c in dec_reg: {:#02x}", self.c); println!("zero flag! {:b}", (self.f & 0b10000000))},
-
+				0x0D => self.c = dec_reg(self.c, &mut self.f),
 				0x0E => self.c = n,
-
-
-
-
+                                0x0F => rrca(&mut self.a, &mut self.f),
 				0x10 => self.stop_flag = true,
 				0x11 => self.set_de(nn),
 				0x12 => mmu_ref.set_byte(self.get_de() as usize, self.a),
 				0x13 => self.set_de(self.get_de()+1),
-
+				0x14 => self.d = inc_reg(self.d, &mut self.f),
 				0x15 => self.d = dec_reg(self.d, &mut self.f),
-
                                 0x16 => self.d = n,
-
                                 0x17 => self.a = rla(self.a, &mut self.f),
-
                                 0x18 => self.jump_relative(n),
-
-
-                                0x1D => { self.e = dec_reg(self.e, &mut self.f); },
-
+                                0x19 => {
+                                    let hl = self.get_hl();
+                                    let de = self.get_de();
+                                    let new_hl = add_double_regs(hl, de, &mut self.f);
+                                    self.set_hl(new_hl);
+                                },
+				0x1A => self.a = mmu_ref.get_byte(self.get_de() as usize),
+                                0x1B => {
+                                    let de = self.get_de();
+                                    let new_de = de.wrapping_sub(1);
+                                    self.set_de(new_de);
+                                },
+				0x1C => self.e = inc_reg(self.e, &mut self.f),
+                                0x1D => self.e = dec_reg(self.e, &mut self.f),
                                 0x1E => self.e = n,
-
-				0x20 => if (self.f & 0b10000000) == 0 {self.jump_relative(n); println!("NOT ZERO!");} else {println!("ZERO!");}, // JMP if non-zero,
+                                0x1F => rra(&mut self.a, &mut self.f),
+				0x20 => if (self.f & 0b10000000) == 0 {self.jump_relative(n);},
 				0x21 => ld_word(&mut self.h, &mut self.l, nn),
-
-				0x22 => { let hl_val = self.get_hl(); 
-                          mmu_ref.set_byte(hl_val as usize, self.a);
-                          self.set_hl(hl_val.wrapping_add(1)); },
+				0x22 => { 
+                                    let hl_val = self.get_hl(); 
+                                    mmu_ref.set_byte(hl_val as usize, self.a);
+                                    self.set_hl(hl_val.wrapping_add(1)); 
+                                },
 				0x23 => self.set_hl(self.get_hl()+1),
-
                                 0x24 => self.h = inc_reg(self.h, &mut self.f),
+				0x25 => self.h = dec_reg(self.h, &mut self.f),
+                                0x26 => self.h = n,
+
 
 
 				0x28 => if (self.f & 0b10000000) != 0 {self.jump_relative(n);}, // JMP if zero,
-
+                                0x29 => {
+                                    let hl = self.get_hl();
+                                    let new_hl = add_double_regs(hl, hl, &mut self.f);
+                                    self.set_hl(new_hl);
+                                },
+                                0x2B => {
+                                    let hl = self.get_hl();
+                                    let new_hl = hl.wrapping_sub(1);
+                                    self.set_hl(new_hl);
+                                },
+				0x2C => self.l = inc_reg(self.l, &mut self.f),
 
 				0x2E => self.l = n,
 
 				0x2F => complement_reg(&mut self.a, &mut self.f),
 
 				0x31 => ld_word(&mut self.s, &mut self.p, nn),
-				0x32 => { let hl_val = self.get_hl(); 
-                                  //println!("(PRE) HL REGISTER!!! {:#04x}", hl_val);
-                                  mmu_ref.set_byte(hl_val as usize, self.a);
-                                  self.set_hl(hl_val.wrapping_sub(1));
-                                  //println!("HL REGISTER!!! {:#04x}", self.get_hl());
-                                  },
+				0x32 => { 
+                                    let hl_val = self.get_hl(); 
+                                    mmu_ref.set_byte(hl_val as usize, self.a);
+                                    self.set_hl(hl_val.wrapping_sub(1));
+                                },
 
 				0x33 => self.set_sp(self.get_sp()+1),
-
-                                0x3D => {  self.a = dec_reg(self.a, &mut self.f);
-                                           //println!("A after dec_reg: {:#02x}", self.a);
-                                           //println!("zero flag after dec A! {:b}", (self.f & 0b10000000));
-                                                                                        },
+                                0x39 => {
+                                    let hl = self.get_hl();
+                                    let sp = self.get_sp();
+                                    let new_hl = add_double_regs(hl, sp, &mut self.f);
+                                    self.set_hl(new_hl);
+                                },
+                                0x3B => {
+                                    let sp = self.get_sp();
+                                    let new_sp = sp.wrapping_sub(1);
+                                    self.set_sp(new_sp);
+                                },
+				0x3C => self.a = inc_reg(self.a, &mut self.f),
+                                0x3D => self.a = dec_reg(self.a, &mut self.f),
 				0x3E => self.a = n,
-
-				0x7F => self.a = self.a,
-				0x78 => self.a = self.b,
-				0x79 => self.a = self.c,
-				0x7A => self.a = self.d,
-				0x7B => self.a = self.e,
-				0x7C => self.a = self.h,
-				0x7D => self.a = self.l,
-				0x0A => self.a = mmu_ref.get_byte(self.get_bc() as usize),
-				0x1A => self.a = mmu_ref.get_byte(self.get_de() as usize),
-				0x7E => self.a = mmu_ref.get_byte(self.get_hl() as usize),
-				0xFA => self.a = mmu_ref.get_byte(self.l_e_word_conversion(nn) as usize),
-				0x3E => self.a = n,	
-
-
 				0x40 => self.b = self.b,
 				0x41 => self.b = self.c,
 				0x42 => self.b = self.d,
@@ -876,7 +967,6 @@ impl CPU  {
 				0x4D => self.c = self.l,
 				0x4E => self.c = mmu_ref.get_byte(self.get_hl() as usize),
 				0x4F => self.c = self.a,
-
 				0x50 => self.d = self.b,
 				0x51 => self.d = self.c,
 				0x52 => self.d = self.d,
@@ -927,12 +1017,23 @@ impl CPU  {
 				0x7D => self.a = self.l,
 				0x7E => self.a = mmu_ref.get_byte(self.get_hl() as usize),
 				0x7F => self.a = self.a,
-
-
+                                0x80 => self.a = add_reg(self.a, self.b, &mut self.f),
+                                0x81 => self.a = add_reg(self.a, self.c, &mut self.f),
+                                0x82 => self.a = add_reg(self.a, self.d, &mut self.f),
+                                0x83 => self.a = add_reg(self.a, self.e, &mut self.f),
+                                0x84 => self.a = add_reg(self.a, self.h, &mut self.f),
+                                0x85 => self.a = add_reg(self.a, self.l, &mut self.f),
                                 0x86 => self.a = add_reg(self.a, mmu_ref.get_byte(self.get_hl() as usize), &mut self.f),
-				
+                                0x87 => self.a = add_reg(self.a, self.a, &mut self.f),
+                                0x88 => self.a = adc_reg(self.a, self.b, &mut self.f),
+                                0x89 => self.a = adc_reg(self.a, self.c, &mut self.f),
+                                0x8A => self.a = adc_reg(self.a, self.d, &mut self.f),
+                                0x8B => self.a = adc_reg(self.a, self.e, &mut self.f),
+                                0x8C => self.a = adc_reg(self.a, self.h, &mut self.f),
+                                0x8D => self.a = adc_reg(self.a, self.l, &mut self.f),
+                                0x8E => self.a = adc_reg(self.a, mmu_ref.get_byte(self.get_hl() as usize), &mut self.f),
+                                0x8F => self.a = adc_reg(self.a, self.a, &mut self.f),
                                 0x90 => self.a = sub_reg(self.a, self.b, &mut self.f),
-
 
 				0xEA => mmu_ref.set_byte(self.l_e_word_conversion(nn) as usize, self.a),
 
@@ -969,47 +1070,58 @@ impl CPU  {
 
                                 0xBE => compare(self.a, mmu_ref.get_byte(self.get_hl() as usize), &mut self.f),
 
-
-                0xC1 => {let bc_val = self.stack_pop(mmu_ref); self.set_bc(bc_val);},
+                                0xC1 => {let bc_val = self.stack_pop(mmu_ref); self.set_bc(bc_val);},
 				0xC2 => self.pc = ternary!((self.f & 0b10000000) == 0, nn, self.pc),
 				0xC3 => self.pc = self.l_e_word_conversion(nn) - (instruction_size as u16),
+                                0xC5 => self.stack_push(mmu_ref, self.get_bc()),
 
-                0xC5 => self.stack_push(mmu_ref, self.get_bc()),
+                                0xC9 => { 
+                                    println!("RETURN!!\n"); 
+                                    self.pc = self.stack_pop(mmu_ref);
+                                    println!("pc val: {:#04x}", self.pc);
+                                    skip_increment = true;
+                                },
 
-                0xC9 => { println!("RETURN!!\n"); 
-                          self.pc = self.stack_pop(mmu_ref);
-                          println!("pc val: {:#04x}", self.pc);
-                          skip_increment = true; },
-
-                
 				0xCA => self.pc = ternary!((self.f & 0b10000000) != 0, nn, self.pc),
+                                0xCB => (), // this is just the CB prefix
 
-                0xCD => {
-                            self.pc += instruction_size as u16;
-                            self.stack_push(mmu_ref, self.pc);
-                            self.pc = nn;
-                            skip_increment = true;
-                        },
+                                0xCD => {
+                                            self.pc += instruction_size as u16;
+                                            self.stack_push(mmu_ref, self.pc);
+                                            self.pc = nn;
+                                            skip_increment = true;
+                                        },
 
 				0xD2 => self.pc = ternary!((self.f & 0b00010000) == 0, nn, self.pc),
+                                0xD3 => (),
+
 				0xDA => self.pc = ternary!((self.f & 0b00010000) != 0, nn, self.pc),
 				//0xE9 => self.pc = mmu_ref.get_byte(
+                                0xDB => (),
+                                0xDD => (),
 				
 
 				0xE0 => mmu_ref.set_byte((0xFF00 + (n as u16)) as usize, self.a),
 
 
 				0xE2 => mmu_ref.set_byte((0xFF00 + (self.c as u16)) as usize, self.a),
+                                0xE3 => (),
+                                0xE4 => (),
+                                0xEB => (),
+                                0xEC => (),
+                                0xED => (),
 
 				
 
-                0xF0 => self.a = mmu_ref.get_byte((0xFF00 + (n as u16) as usize)),
-
+                                0xF0 => self.a = mmu_ref.get_byte((0xFF00 + (n as u16) as usize)),
 
 				0xF3 => self.cycles_to_di = 2,
+                                0xF4 => (),
 
+				0xFA => self.a = mmu_ref.get_byte(self.l_e_word_conversion(nn) as usize),
 				0xFB => self.cycles_to_ei = 2, 
-
+                                0xFC => (),
+                                0xFD => (),
 				0xFE => compare(self.a, n, &mut self.f),
 
 

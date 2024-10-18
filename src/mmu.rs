@@ -61,6 +61,13 @@ impl MMU {
 
     }
 
+    pub fn set_word(&mut self, mut addr: usize, data: u16) {
+        if echo_ram(addr) { addr = echo_ram_sub(addr); }
+        self.memory[addr] = (data & 0x00FF) as u8;
+        self.memory[addr + 1] = (data >> 8) as u8;
+    }
+
+
     // check if we have we set the 'BOOT' reg, i.e., at the end of the boot sequence
     pub fn get_boot(&mut self) -> u8 {
         self.memory[0xFF50]
