@@ -1,9 +1,4 @@
-
-
 // TODO should these be labeled static?
-
-
-
 // NOTE: These cycle times assume no branch is taken.
 // Not sure if that matters, but just in case it becomes an issue.
 
@@ -26,10 +21,6 @@ pub const cycle_times : [[u8 ; 16]; 16] =
      [12,12,8,4,0,16,8,16,12,8,16,4,0,0,8,16],
     ];
 
-
-
-
-
 pub const cb_prefixed_cycle_times : [[u8 ; 16]; 16] =
     [[8,8,8,8,8,8,16,8,8,8,8,8,8,8,16,8],
    	 [8,8,8,8,8,8,16,8,8,8,8,8,8,8,16,8],
@@ -47,9 +38,6 @@ pub const cb_prefixed_cycle_times : [[u8 ; 16]; 16] =
    	 [8,8,8,8,8,8,16,8,8,8,8,8,8,8,16,8], 
    	 [8,8,8,8,8,8,16,8,8,8,8,8,8,8,16,8], 
    	 [8,8,8,8,8,8,16,8,8,8,8,8,8,8,16,8]];
-
-
-
 
 //NOTE: All 0xCB prefixed instructions are two bytes long.
 // as such, they're not included in this table.
