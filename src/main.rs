@@ -19,6 +19,53 @@ const CYCLES_PER_FRAME: u32 = CPU_FREQUENCY / FRAME_RATE;
 const GB_SCREEN_DIM : u32 = 23040; // 160x144
 const SCREEN_UPSCALE_FACTOR : f32 = 5.0; // gameboy screen is super tiny, so we upscale it
 
+
+fn handle_input(mmu: &mut mmu::MMU) {
+    // Joypad register address
+    let joypad_reg = 0xFF00;
+    let mut joypad_state = mmu.get_byte(joypad_reg);
+
+
+    // Reset lower 4 bits
+    joypad_state |= 0x0F;
+
+    if is_key_down(KeyCode::W) {
+        joypad_state &= !0b00000100; // Up
+        //println!("UP");
+    }
+    if is_key_down(KeyCode::A) {
+        joypad_state &= !0b00000010; // Left
+        //println!("LEFT");
+    }
+    if is_key_down(KeyCode::S) {
+        joypad_state &= !0b00001000; // Down
+        //println!("DOWN");
+    }
+    if is_key_down(KeyCode::D) {
+        joypad_state &= !0b00000001; // Right
+        //println!("RIGHT");
+    }
+    if is_key_down(KeyCode::J) {
+        joypad_state &= !0b00000001; // A
+        //println!("A");
+    }
+    if is_key_down(KeyCode::K) {
+        joypad_state &= !0b00000010; // B
+        //println!("B");
+    }
+    if is_key_down(KeyCode::LeftShift) {
+        joypad_state &= !0b00000100; // Select
+        //println!("SELECT");
+    }
+    if is_key_down(KeyCode::Enter) {
+        joypad_state &= !0b00001000; // Start
+        //println!("START");
+    }
+
+    mmu.set_byte(joypad_reg, joypad_state);
+}
+
+
 #[macroquad::main("Fierce Deity's GB")]
 async fn main() {
 
@@ -43,7 +90,7 @@ async fn main() {
     let mut ppu = ppu::PPU::new();
     //let apu = apu::APU::new(mmu_ref);
 
-    mmu.load_rom(byte_buffer);
+    mmu.load_rom(&byte_buffer);
     // TODO only if we're running the BOOT ROM
     mmu.map_cartridge_nintendo_logo();
 
@@ -144,6 +191,9 @@ async fn main() {
                 ..Default::default()
             },
         );
+
+        handle_input(&mut mmu);
+
         next_frame().await
     }
 

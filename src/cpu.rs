@@ -515,11 +515,6 @@ impl CPU  {
 		return self.a;
 	}
 
-	// swaps the order of bytes in a word to account for little-endian
-	fn l_e_word_conversion(self, nn : u16) -> u16 {
-		return ((nn & 0x00FF) << 8) | ((nn & 0xFF00) >> 8);
-	}
-
 	fn get_af(self) -> u16 {
 		return ((self.a as u16) << 8) | (self.f as u16);
 	}
@@ -642,12 +637,12 @@ impl CPU  {
 		let cycles : u8 = ternary!(cb_prefix, cpu_tables::cb_prefixed_cycle_times[i1][i2], cpu_tables::cycle_times[i1][i2]);
 		let	instruction_size : u8 = ternary!(cb_prefix, 2, cpu_tables::instruction_sizes[i1][i2]);
 
-        let mut skip_increment = false;
+                let mut skip_increment = false;
 	
 		// pre-emptive execution to save space below
 		//println!("{}", self.pc);
 
-		println!("OPCODE {}{:#02x}. PC: {:#04x}", if cb_prefix { "CB " } else { "" }, opcode, if cb_prefix { self.pc - 1 } else {self.pc});
+		println!("OPCODE! {}{:#02x}. PC: {:#04x}", if cb_prefix { "CB " } else { "" }, opcode, if cb_prefix { self.pc - 1 } else {self.pc});
 
 		let nn = self.next_word(self.pc+1, mmu_ref);
 		let n = self.fetch(self.pc+1, mmu_ref);
@@ -1192,7 +1187,7 @@ impl CPU  {
                                 0xBF => compare(self.a, self.a, &mut self.f),
                                 0xC1 => {let bc_val = self.stack_pop(mmu_ref); self.set_bc(bc_val);},
 				0xC2 => self.pc = ternary!((self.f & 0b10000000) == 0, nn, self.pc),
-				0xC3 => self.pc = self.l_e_word_conversion(nn) - (instruction_size as u16),
+				0xC3 => self.pc = nn - (instruction_size as u16),
                                 0xC4 => {
                                     if(!get_flag(&mut self.f, ZERO)) {
                                         self.pc += instruction_size as u16;
@@ -1243,7 +1238,7 @@ impl CPU  {
                                     skip_increment = true;
                                 },
                                 0xD0 => mmu_ref.set_byte((0xFF00 | (n as u16)) as usize, self.a),
-                                0xD1 => {let hl_val = self.stack_pop(mmu_ref); self.set_hl(hl_val);},
+                                0xD1 => {let de_val = self.stack_pop(mmu_ref); self.set_de(de_val);},
 				0xD2 => self.pc = ternary!((self.f & 0b00010000) == 0, nn, self.pc),
                                 0xD3 => (),
                                 0xD4 => {
@@ -1290,21 +1285,34 @@ impl CPU  {
                                     skip_increment = true;
                                 },
 				0xE0 => mmu_ref.set_byte((0xFF00 + (n as u16)) as usize, self.a),
-                                //0xE1 =>
-
-
+                                0xE1 => {let hl_val = self.stack_pop(mmu_ref); self.set_hl(hl_val);},
 				0xE2 => mmu_ref.set_byte((0xFF00 + (self.c as u16)) as usize, self.a),
                                 0xE3 => (),
                                 0xE4 => (),
+                                0xE5 => self.stack_push(mmu_ref, self.get_hl()),
                                 0xE6 => and(&mut self.a, n, &mut self.f),
+                                0xE7 => {
+                                    self.stack_push(mmu_ref, self.pc);
+                                    self.pc = 0x20;
+                                    skip_increment = true;
+                                },
+                                0xE8 => {
+                                    let hl = self.get_hl();
+                                    let new_hl = add_double_regs(hl, n as u16, &mut self.f);
+                                    self.set_hl(new_hl);
+                                    // we have to explicitly clear the ZERO flag
+                                    set_flag(&mut self.f, ZERO, false);
+                                },
 				//0xE9 => self.pc = mmu_ref.get_byte(
-				0xEA => mmu_ref.set_byte(self.l_e_word_conversion(nn) as usize, self.a),
+				0xEA => mmu_ref.set_byte(nn as usize, self.a),
                                 0xEB => (),
                                 0xEC => (),
                                 0xED => (),
-
-				
-
+                                0xEF => {
+                                    self.stack_push(mmu_ref, self.pc);
+                                    self.pc = 0x28;
+                                    skip_increment = true;
+                                },
                                 0xF0 => self.a = mmu_ref.get_byte((0xFF00 + (n as u16) as usize)),
 
 				0xF3 => self.cycles_to_di = 2,
@@ -1319,7 +1327,7 @@ impl CPU  {
                                     let hl = self.get_hl(); 
                                     self.set_sp(hl);
                                 },
-				0xFA => self.a = mmu_ref.get_byte(self.l_e_word_conversion(nn) as usize),
+				0xFA => self.a = mmu_ref.get_byte(nn as usize),
 				0xFB => self.cycles_to_ei = 2, 
                                 0xFC => (),
                                 0xFD => (),

@@ -35,6 +35,7 @@ pub struct MMU {
 
 
 	pub memory : Vec<u8>, 
+        pub rom_data : Vec<u8>,
 }
 
 fn echo_ram_sub(addr: usize) -> usize {
@@ -52,14 +53,29 @@ impl MMU {
     pub fn new() -> MMU {
         MMU {
             memory : vec![0; 0x10000],
+            rom_data : vec![],
         }
     }
 
     pub fn set_byte(&mut self, mut addr: usize, data : u8) {
         if echo_ram(addr) { addr = echo_ram_sub(addr); }
+        //handle_bank_switch(addr, data);
         self.memory[addr] = data;
 
     }
+
+    /*
+    fn handle_bank_switch(&mut self, address: usize, value: u8) {
+        if (0x2000..=0x3FFF).contains(&address) {
+            match value {
+                0 => load_into_switchable_bank(32768..49152),  // 33-48 KB
+                1 => load_into_switchable_bank(49152..65536),  // 49-64 KB
+                _ => {} // Ignore other values for now 
+            }
+        }
+    }
+    */
+
 
     pub fn set_word(&mut self, mut addr: usize, data: u16) {
         if echo_ram(addr) { addr = echo_ram_sub(addr); }
@@ -104,12 +120,24 @@ impl MMU {
         self.memory[0x014D] = 0x2F;
     }
 
-    pub fn load_rom(&mut self, rom_data : Vec<u8>) {
-        // TODO assuming, for now, that ROM data leq than 0x4000 bytes
-        for i in 0..(rom_data.len()) {
-                self.memory[i] = rom_data[i];
-                println!("{:#02x}", rom_data[i]);
+
+
+
+
+    pub fn load_rom(&mut self, rom_data : &Vec<u8>) {
+        self.rom_data = rom_data.to_vec();
+        // First, load fixed bank
+        for i in 0x0000..0x4000 {
+            // should probably only happen with boot ROM
+            if(i >= rom_data.len()) {
+                return;
+            }
+            self.memory[i] = rom_data[i];
+            //println!("{:#02x}", rom_data[i]);
         }
-        println!("=================================");
+        // Next, load switchable bank
+        for i in 0x4000..0x8000 {
+            self.memory[i] = rom_data[i];
+        }
     }
 }
