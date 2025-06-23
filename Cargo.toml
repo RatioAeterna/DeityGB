@@ -10,3 +10,4 @@ edition = "2018"
 
 [dependencies]
 macroquad = "0.4"
+csv = "1.3.1"

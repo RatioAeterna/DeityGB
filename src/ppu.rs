@@ -181,9 +181,12 @@ impl PPU {
             // next, index into tile data to get the TILE data: we can mod the coordinates by 8 to
             // get the actual byte that we want
 
-            // first, index into the tilemap using scx and scy
-            let tile_id : u8 = self.tilemap_fetch_id(((scx + lx) / 8) as usize, ((scy + ly) / 8) as usize, mmu_ref);
-            let pixel_data : u8 = self.tiledata_fetch_pixel((scx + lx) as usize, (scy + ly) as usize, tile_id as usize, mmu_ref);
+            let bg_x = ((scx as u16 + lx as u16) % 256) as u8;
+            let bg_y = ((scy as u16 + ly as u16) % 256) as u8;
+
+            // first, index into the tilemap using bg_x and bg_y
+            let tile_id : u8 = self.tilemap_fetch_id((bg_x / 8) as usize, (bg_y / 8) as usize, mmu_ref);
+            let pixel_data : u8 = self.tiledata_fetch_pixel(bg_x as usize, bg_y as usize, tile_id as usize, mmu_ref);
             self.set_screen_pixel(lx, ly, pixel_data); // sets the actual pixel into the screen 
         }
         self.inc_ly(mmu_ref);

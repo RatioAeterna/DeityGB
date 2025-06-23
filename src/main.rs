@@ -10,6 +10,7 @@ mod mmu;
 mod ppu;
 //mod apu;
 mod cpu_tables;
+mod disassembler;
 
 
 const CPU_FREQUENCY : u32 = 4194304; // 4.2 MHz
