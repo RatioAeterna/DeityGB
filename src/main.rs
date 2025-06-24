@@ -66,11 +66,24 @@ fn handle_input(mmu: &mut mmu::MMU) {
     mmu.set_byte(joypad_reg, joypad_state);
 }
 
+pub fn load_file_bytes(path: &str) -> Vec<u8> {
+    let mut file = File::open(path).expect("Couldn't open file");
+    let mut buffer = Vec::new();
+    file.read_to_end(&mut buffer).expect("Couldn't read file");
+    buffer
+}
+
 
 #[macroquad::main("Fierce Deity's GB")]
 async fn main() {
-
     let args: Vec<String> = env::args().collect();
+
+    let mut mmu = mmu::MMU::new();
+    let mut cpu = cpu::CPU::new();
+    let mut ppu = ppu::PPU::new();
+    //let apu = apu::APU::new(mmu_ref);
+    
+    /*
     let path = Path::new(&args[1]);
     let display = path.display();
     let mut cartridge = match File::open(&path) {
@@ -79,21 +92,24 @@ async fn main() {
     };
     let mut byte_buffer = Vec::new();
     cartridge.read_to_end(&mut byte_buffer);
+    */
+    let mut boot_byte_buffer = load_file_bytes("dmg_boot.bin");
+    mmu.load_boot_rom(&boot_byte_buffer);
+    mmu.map_cartridge_nintendo_logo();
 
+
+    /*
     let hex_values: Vec<String> = byte_buffer.iter()
                                     .map(|byte| format!("{:02x}", byte))
                                     .collect();
     let hex_str = hex_values.join(" ");
     println!("{}", hex_str);
+    */
 
-    let mut mmu = mmu::MMU::new();
-    let mut cpu = cpu::CPU::new();
-    let mut ppu = ppu::PPU::new();
-    //let apu = apu::APU::new(mmu_ref);
-
-    mmu.load_rom(&byte_buffer);
-    // TODO only if we're running the BOOT ROM
-    mmu.map_cartridge_nintendo_logo();
+    if args.len() > 1 {
+        let mut cartridge_byte_buffer = load_file_bytes(&args[1]);
+        mmu.load_rom(&cartridge_byte_buffer);
+    }
 
     let fd_title : String = "Fierce Deity's GB".to_string();
     let conf = Conf {

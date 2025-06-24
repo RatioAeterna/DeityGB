@@ -661,16 +661,8 @@ impl CPU  {
 
             let mut skip_increment = false;
 
-            // pre-emptive execution to save space below
-            //println!("{}", self.pc);
-
-            println!("OPCODE! {}{:#02x}. PC: {:#04x}", if cb_prefix { "CB " } else { "" }, opcode, if cb_prefix { self.pc - 1 } else {self.pc});
-
             let nn = self.next_word(self.pc+1, mmu_ref);
             let n = self.fetch(self.pc+1, mmu_ref);
-
-            //println!("CORRESPONDING NN: {:#04x}", nn);
-
 
             if cb_prefix {
                     // decrement to 'back up' once
@@ -1033,7 +1025,7 @@ impl CPU  {
                                 mmu_ref.set_byte(hl_val as usize, self.a);
                                 self.set_hl(hl_val.wrapping_sub(1));
                             },
-                            0x33 => self.set_sp(self.get_sp()+1),
+                            0x33 => self.set_sp(self.get_sp().wrapping_add(1)),
                             0x34 => {
                                 let at_hl = mmu_ref.get_byte(self.get_hl() as usize);
                                 let new_at_hl = inc_reg(at_hl, &mut self.f);
@@ -1330,20 +1322,37 @@ impl CPU  {
                             0xEB => (),
                             0xEC => (),
                             0xED => (),
+                            0xEE => xor(&mut self.a, n, &mut self.f),
                             0xEF => {
                                 self.stack_push(mmu_ref, self.pc);
                                 self.pc = 0x28;
                                 skip_increment = true;
                             },
                             0xF0 => self.a = mmu_ref.get_byte((0xFF00 + (n as u16) as usize)),
-
+                            0xF1 => {let af_val = self.stack_pop(mmu_ref); self.set_af(af_val);},
                             0xF3 => self.cycles_to_di = 2,
                             0xF4 => (),
+                            0xF5 => self.stack_push(mmu_ref, self.get_af()),
                             0xF6 => or(&mut self.a, n, &mut self.f),
                             0xF7 => {
                                 self.stack_push(mmu_ref, self.pc);
                                 self.pc = 0x30;
                                 skip_increment = true;
+                            },
+                            0xF8 => {
+                                let offset = n as i8 as i16 as u16;
+                                let sp = self.get_sp();
+                                let result = sp.wrapping_add(offset);
+
+                                self.set_hl(result);
+
+                                set_flag(&mut self.f, ZERO, false);
+                                set_flag(&mut self.f, SUB, false);
+                                
+                                // TODO understand this shit later
+                                let carry_bits = (sp ^ offset ^ result) as u16;
+                                set_flag(&mut self.f, HC, (carry_bits & 0x10) != 0);
+                                set_flag(&mut self.f, CARRY, (carry_bits & 0x100) != 0);
                             },
                             0xF9 => {
                                 let hl = self.get_hl(); 
@@ -1375,12 +1384,10 @@ impl CPU  {
                 self.pc += instruction_size as u16;
     }
 
-    // TODO have an actual conditional for "has_game_rom"
-    // maybe we don't even need the flag
-    //if mmu_ref.get_boot() && !mmu.has_game_rom() {
-    if (mmu_ref.get_boot() != 0) && true {
-        self.halt_flag = true;
-        // TODO set pc to 0x0100
+    if (mmu_ref.get_boot() == 1) {
+        self.pc = 0x0100;
+        println!("BOOT ROM DONE");
+        mmu_ref.set_byte(0xFF50 as usize, 10);
     }
     /*
             self.cycles_to_ei -= 1;

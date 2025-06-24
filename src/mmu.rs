@@ -35,6 +35,7 @@ pub struct MMU {
 
 
 	pub memory : Vec<u8>, 
+        pub boot_rom : Vec<u8>,
         pub rom_data : Vec<u8>,
 }
 
@@ -53,15 +54,16 @@ impl MMU {
     pub fn new() -> MMU {
         MMU {
             memory : vec![0; 0x10000],
+            boot_rom : vec![0; 0x0100],
             rom_data : vec![],
         }
     }
 
     pub fn set_byte(&mut self, mut addr: usize, data : u8) {
         if echo_ram(addr) { addr = echo_ram_sub(addr); }
+
         //handle_bank_switch(addr, data);
         self.memory[addr] = data;
-
     }
 
     /*
@@ -79,19 +81,26 @@ impl MMU {
 
     pub fn set_word(&mut self, mut addr: usize, data: u16) {
         if echo_ram(addr) { addr = echo_ram_sub(addr); }
+
         self.memory[addr] = (data & 0x00FF) as u8;
         self.memory[addr + 1] = (data >> 8) as u8;
     }
 
 
     // check if we have we set the 'BOOT' reg, i.e., at the end of the boot sequence
-    pub fn get_boot(&mut self) -> u8 {
+    pub fn get_boot(&self) -> u8 {
         self.memory[0xFF50]
     }
 
     pub fn get_byte(&self, mut addr: usize) -> u8 {
         if echo_ram(addr) { addr = echo_ram_sub(addr); }
-        return self.memory[addr];
+
+        if addr < 0x0100 && (self.get_boot() == 0) {
+            return self.boot_rom[addr];
+        }
+        else {
+            return self.memory[addr];
+        }
     }
 
     pub fn enable_interrupts(&mut self) {
@@ -121,6 +130,12 @@ impl MMU {
     }
 
 
+    pub fn load_boot_rom(&mut self, rom_data : &Vec<u8>) {
+        self.rom_data = rom_data.to_vec();
+        for i in 0x0000..0x0100 {
+            self.boot_rom[i] = rom_data[i];
+        }
+    }
 
 
 
