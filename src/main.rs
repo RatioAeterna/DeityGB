@@ -149,7 +149,7 @@ async fn main() {
             accumulated_cycles -= 456;
 
             // PPU RENDERING: we *only* render updates to the actual screen on vblank
-            ppu.render_line(&mut mmu);
+            //ppu.render_line(&mut mmu);
             if ppu.reached_vblank() && !rendered_yet {
                 gb_screen = *ppu.get_buffer();
 

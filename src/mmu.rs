@@ -95,6 +95,11 @@ impl MMU {
     pub fn get_byte(&self, mut addr: usize) -> u8 {
         if echo_ram(addr) { addr = echo_ram_sub(addr); }
 
+        // TODO JUST FOR DEBUGGING WITH GB DOCTOR
+        if addr == 0xFF44 {
+            return 0x90;
+        }
+
         if addr < 0x0100 && (self.get_boot() == 0) {
             return self.boot_rom[addr];
         }

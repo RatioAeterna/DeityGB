@@ -2,6 +2,21 @@ use crate::mmu as mmu;
 use crate::cpu_tables as cpu_tables;
 use crate::disassembler::Disassembler;
 
+use std::fs::OpenOptions;
+use std::io::Write;
+
+fn log_line(s: &str) {
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("log.txt")
+        .expect("Failed to open log file");
+
+    writeln!(file, "{}", s).unwrap();
+    file.flush().unwrap();
+    println!("STR: {}", s);
+}
+
 macro_rules! ternary {
     ($c:expr, $v:expr, $v1:expr) => {
         if $c {$v} else {$v1}
@@ -16,7 +31,7 @@ macro_rules! ternary {
 const ZERO : u8 = 7;
 const SUB : u8 = 6;
 const HC : u8 = 5;
-const CARRY : u8 = 5;
+const CARRY : u8 = 4;
 
 
 // SOO much flag modification, so this function is my favorite EVER.
@@ -250,6 +265,7 @@ fn daa(a: &mut u8, flags: &mut u8) {
         }
         if get_flag(flags, CARRY) {
             correction |= 0x60;
+            carry_flag = true;
         }
     }
 
@@ -390,10 +406,18 @@ fn rl(reg : u8, flags : &mut u8) -> u8 {
 }
 
 fn rr(reg : u8, flags : &mut u8) -> u8 {
-	let old_carry = *flags & 0b00010000;
-	let new_carry = reg & 0b10000000;
-	let ret = (old_carry << 3) | (reg >> 1);
-	*flags = ternary!(ret == 0, 0b10000000, 0b00000000) | (new_carry >> 3);
+	//let old_carry = *flags & 0b00010000;
+	//let new_carry = reg & 0b10000000;
+	//*flags = ternary!(ret == 0, 0b10000000, 0b00000000) | (new_carry >> 3);
+        let old_carry = get_flag(flags, CARRY);
+        let new_carry = reg & 0b00000001;
+	let ret = ((old_carry as u8) << 7) | (reg >> 1);
+
+        set_flag(flags, CARRY, new_carry > 0);
+        set_flag(flags, ZERO, ret == 0);
+        set_flag(flags, SUB, false);
+        set_flag(flags, HC, false);
+
 	ret
 }
 
@@ -547,7 +571,9 @@ impl CPU  {
 
     fn set_af(&mut self, val : u16) {
             self.a = ((val & 0xFF00) >> 8) as u8;
-            self.f = (val & 0x00FF) as u8;
+            // TODO CRUCIAL DETAIL -- you must zero out the lower nibble of F. Always.
+            // We might need to do this elsewhere, unsure. Making a note.
+            self.f = (val & 0x00F0) as u8;
     }
 
     fn set_bc(&mut self, val : u16) {
@@ -663,6 +689,16 @@ impl CPU  {
 
             let nn = self.next_word(self.pc+1, mmu_ref);
             let n = self.fetch(self.pc+1, mmu_ref);
+
+            // PRINT FLAGS FOR DEBUG
+            println!(
+                "FLAGS before: Z={} N={} H={} C={}",
+                get_flag(&mut self.f, ZERO),
+                get_flag(&mut self.f, SUB),
+                get_flag(&mut self.f, HC),
+                get_flag(&mut self.f, CARRY)
+            );
+
 
             if cb_prefix {
                     // decrement to 'back up' once
@@ -1251,7 +1287,20 @@ impl CPU  {
                                 self.pc = 0x08;
                                 skip_increment = true;
                             },
-                            0xD0 => mmu_ref.set_byte((0xFF00 | (n as u16)) as usize, self.a),
+                            0xD0 => {
+                                if !get_flag(&mut self.f, CARRY) {
+                                    self.pc = self.stack_pop(mmu_ref);
+                                    skip_increment = true;
+                                    // TODO update cycles
+                                    //self.cycles += 20; // RET taken
+                                }
+                                // TODO otherwise we just take 8, the default
+                                /*
+                                else {
+                                    self.cycles += 8;  // RET not taken
+                                }
+                                */
+                            },
                             0xD1 => {let de_val = self.stack_pop(mmu_ref); self.set_de(de_val);},
                             0xD2 => self.pc = ternary!((self.f & 0b00010000) == 0, nn, self.pc),
                             0xD3 => (),
@@ -1401,6 +1450,24 @@ impl CPU  {
                     self.cycles_to_di = -1;
             }
     */
+    if (mmu_ref.get_byte(0xFF50 as usize) == 10) {
+        log_line(&format!(
+            "A:{:02X} F:{:02X} B:{:02X} C:{:02X} D:{:02X} E:{:02X} H:{:02X} L:{:02X} SP:{:04X} PC:{:04X} PCMEM:{:02X},{:02X},{:02X},{:02X}",
+            self.a, self.f, self.b, self.c, self.d, self.e, self.h, self.l, self.get_sp(), self.pc,
+            mmu_ref.get_byte(self.pc as usize), mmu_ref.get_byte((self.pc+1) as usize), mmu_ref.get_byte((self.pc+2) as usize), mmu_ref.get_byte((self.pc+3) as usize)
+        ));
+        /*
+        println!(
+            "FLAGS after: Z={} N={} H={} C={}",
+            get_flag(&mut self.f, ZERO),
+            get_flag(&mut self.f, SUB),
+            get_flag(&mut self.f, HC),
+            get_flag(&mut self.f, CARRY)
+        );
+        */
+    }
+
+
     cycles
     }
 }
