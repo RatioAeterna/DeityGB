@@ -999,7 +999,7 @@ impl CPU  {
                             0x10 => self.stop_flag = true,
                             0x11 => self.set_de(nn),
                             0x12 => mmu_ref.set_byte(self.get_de() as usize, self.a),
-                            0x13 => self.set_de(self.get_de()+1),
+                            0x13 => self.set_de(self.get_de().wrapping_add(1)),
                             0x14 => self.d = inc_reg(self.d, &mut self.f),
                             0x15 => self.d = dec_reg(self.d, &mut self.f),
                             0x16 => self.d = n,
@@ -1028,7 +1028,7 @@ impl CPU  {
                                 mmu_ref.set_byte(hl_val as usize, self.a);
                                 self.set_hl(hl_val.wrapping_add(1)); 
                             },
-                            0x23 => self.set_hl(self.get_hl()+1),
+                            0x23 => self.set_hl(self.get_hl().wrapping_add(1)),
                             0x24 => self.h = inc_reg(self.h, &mut self.f),
                             0x25 => self.h = dec_reg(self.h, &mut self.f),
                             0x26 => self.h = n,
@@ -1215,7 +1215,10 @@ impl CPU  {
                                 let at_hl = mmu_ref.get_byte(self.get_hl() as usize);
                                 xor(&mut self.a, at_hl, &mut self.f);
                             },
-                            0xAF => xor(&mut self.a, n, &mut self.f),
+                            0xAF => {
+                                let a_val = self.a;
+                                xor(&mut self.a, a_val, &mut self.f);
+                            },
                             0xB0 => or(&mut self.a, self.b, &mut self.f),
                             0xB1 => or(&mut self.a, self.c, &mut self.f),
                             0xB2 => or(&mut self.a, self.d, &mut self.f),
@@ -1236,7 +1239,11 @@ impl CPU  {
                             0xBE => compare(self.a, mmu_ref.get_byte(self.get_hl() as usize), &mut self.f),
                             0xBF => compare(self.a, self.a, &mut self.f),
                             0xC1 => {let bc_val = self.stack_pop(mmu_ref); self.set_bc(bc_val);},
-                            0xC2 => self.pc = ternary!((self.f & 0b10000000) == 0, nn, self.pc),
+                            0xC2 => {
+                                // TODO refactor flag get please. Ugly
+                                self.pc = ternary!((self.f & 0b10000000) == 0, nn, self.pc);
+                                skip_increment = true;
+                            },
                             0xC3 => self.pc = nn - (instruction_size as u16),
                             0xC4 => {
                                 if(!get_flag(&mut self.f, ZERO)) {
@@ -1360,11 +1367,24 @@ impl CPU  {
                                 skip_increment = true;
                             },
                             0xE8 => {
-                                let hl = self.get_hl();
-                                let new_hl = add_double_regs(hl, n as u16, &mut self.f);
-                                self.set_hl(new_hl);
+                                // TODO frankly just refactor this. This never should've used
+                                // add_double_regs since it really is an 8 bit instruction.. stupid
+                                // one-off.
+                                let sp = self.get_sp();
+                                let sign_extended = n as i8 as i16; // TODO try to understand how
+                                                                    // this sign extending twos
+                                                                    // complement works
+                                let new_sp = add_double_regs(sp, sign_extended as u16, &mut self.f);
+                                // we also need to do the 8 bit half carry...
+                                let half_carry = ((sp & 0x000F) + ((sign_extended as u16) & 0x000F)) > 0x000F;
+                                // AND carry. 
+                                let carry = ((sp & 0x00FF) + ((sign_extended as u16) & 0x00FF)) > 0x00FF;
+                                set_flag(&mut self.f, HC, half_carry);
+                                set_flag(&mut self.f, CARRY, carry);
                                 // we have to explicitly clear the ZERO flag
                                 set_flag(&mut self.f, ZERO, false);
+
+                                self.set_sp(new_sp);
                             },
                             0xE9 => self.pc = self.get_hl() - (instruction_size as u16),
                             0xEA => mmu_ref.set_byte(nn as usize, self.a),
