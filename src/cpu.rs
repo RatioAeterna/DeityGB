@@ -383,26 +383,24 @@ fn rrc(reg : u8, flags : &mut u8) -> u8 {
 
 // TODO ugly solution for now but we obviously want to combine rla and rl (and etc.) in the future
 fn rla(reg : u8, flags : &mut u8) -> u8 {
-	let old_carry = *flags & 0b00010000;
-	let new_carry = reg & 0b10000000;
-	let ret = (reg << 1) | (old_carry >> 4);
-
-    *flags &= 0b10000000; // we want to reset everthing else but preserve the zero flag.
-    *flags |= new_carry >> 3;
-	ret
+    let ret = rl(reg, flags);
+    set_flag(flags, ZERO, false);
+    ret
 }
 
 
 // rotate register left through carry
 fn rl(reg : u8, flags : &mut u8) -> u8 {
-	let old_carry = *flags & 0b00010000;
-	let new_carry = reg & 0b10000000;
-	let ret = (reg << 1) | (old_carry >> 4);
+    let old_carry = get_flag(flags, CARRY) as u8;
+    let new_carry = reg & 0b10000000;
+    let ret = (reg << 1) | old_carry;
 
-    *flags = ternary!(ret == 0, 0b10000000, 0b00000000);
+    set_flag(flags, ZERO, ret == 0);
+    set_flag(flags, SUB, false);
+    set_flag(flags, HC, false);
 
-    *flags |= new_carry >> 3;
-	ret
+    set_flag(flags, CARRY, new_carry != 0); 
+    ret
 }
 
 fn rr(reg : u8, flags : &mut u8) -> u8 {
@@ -456,7 +454,8 @@ fn srl(reg: u8, flags: &mut u8) -> u8 {
 
 fn complement_reg(reg : &mut u8, flags : &mut u8) {
 	*reg = !*reg;
-	*flags = 0b01100000;
+        set_flag(flags, SUB, true);
+        set_flag(flags, HC, true);
 }
 
 
@@ -1238,11 +1237,19 @@ impl CPU  {
                             0xBD => compare(self.a, self.l, &mut self.f),
                             0xBE => compare(self.a, mmu_ref.get_byte(self.get_hl() as usize), &mut self.f),
                             0xBF => compare(self.a, self.a, &mut self.f),
+                            0xC0 => {
+                                if !get_flag(&mut self.f, ZERO) {
+                                    self.pc = self.stack_pop(mmu_ref);
+                                    skip_increment = true;
+                                    // TODO update cycles properly
+                                }
+                            },
                             0xC1 => {let bc_val = self.stack_pop(mmu_ref); self.set_bc(bc_val);},
                             0xC2 => {
-                                // TODO refactor flag get please. Ugly
-                                self.pc = ternary!((self.f & 0b10000000) == 0, nn, self.pc);
-                                skip_increment = true;
+                                if !get_flag(&mut self.f, ZERO) {
+                                    self.pc = nn;     
+                                    skip_increment = true;
+                                }
                             },
                             0xC3 => self.pc = nn - (instruction_size as u16),
                             0xC4 => {
@@ -1272,7 +1279,12 @@ impl CPU  {
                                 println!("pc val: {:#04x}", self.pc);
                                 skip_increment = true;
                             },
-                            0xCA => self.pc = ternary!((self.f & 0b10000000) != 0, nn, self.pc),
+                            0xCA => {
+                                if get_flag(&mut self.f, ZERO) {
+                                    self.pc = nn;     
+                                    skip_increment = true;
+                                }
+                            },
                             0xCB => (), // this is just the CB prefix
                             0xCC => {
                                 if(get_flag(&mut self.f, ZERO)) {
@@ -1309,7 +1321,12 @@ impl CPU  {
                                 */
                             },
                             0xD1 => {let de_val = self.stack_pop(mmu_ref); self.set_de(de_val);},
-                            0xD2 => self.pc = ternary!((self.f & 0b00010000) == 0, nn, self.pc),
+                            0xD2 => {
+                                if !get_flag(&mut self.f, CARRY) {
+                                    self.pc = nn;     
+                                    skip_increment = true;
+                                }
+                            }
                             0xD3 => (),
                             0xD4 => {
                                 if(!get_flag(&mut self.f, CARRY)) {
@@ -1337,7 +1354,12 @@ impl CPU  {
                                 skip_increment = true;
                                 mmu_ref.enable_interrupts();
                             },
-                            0xDA => self.pc = ternary!((self.f & 0b00010000) != 0, nn, self.pc),
+                            0xDA => {
+                                if get_flag(&mut self.f, CARRY) {
+                                    self.pc = nn;     
+                                    skip_increment = true;
+                                }
+                            },
                             0xDB => (),
                             0xDC => {
                                 if(get_flag(&mut self.f, CARRY)) {
@@ -1399,6 +1421,7 @@ impl CPU  {
                             },
                             0xF0 => self.a = mmu_ref.get_byte((0xFF00 + (n as u16) as usize)),
                             0xF1 => {let af_val = self.stack_pop(mmu_ref); self.set_af(af_val);},
+                            0xF2 => self.a = mmu_ref.get_byte((0xFF00 + (self.c as u16) as usize)),
                             0xF3 => self.cycles_to_di = 2,
                             0xF4 => (),
                             0xF5 => self.stack_push(mmu_ref, self.get_af()),
