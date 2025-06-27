@@ -404,9 +404,6 @@ fn rl(reg : u8, flags : &mut u8) -> u8 {
 }
 
 fn rr(reg : u8, flags : &mut u8) -> u8 {
-	//let old_carry = *flags & 0b00010000;
-	//let new_carry = reg & 0b10000000;
-	//*flags = ternary!(ret == 0, 0b10000000, 0b00000000) | (new_carry >> 3);
         let old_carry = get_flag(flags, CARRY);
         let new_carry = reg & 0b00000001;
 	let ret = ((old_carry as u8) << 7) | (reg >> 1);
@@ -504,17 +501,21 @@ pub struct CPU {
 	//Halt CPU & LCD display until button pressed.
 	stop_flag : bool,
 	
-	 //Power down CPU until an interrupt occurs. Use this  when ever possible to reduce energy consumption
+	 //Power down CPU until an interrupt occurs. Use this whenever possible to reduce energy consumption
 	halt_flag : bool,
 
-	// set whenever instruction EI encountered: enables interrupts on mmu when at 0 cycles. Default value of -1
-	cycles_to_ei : i8,
-	cycles_to_di : i8,
+        ime : bool, // interrupt master enable flag
+
+	// set whenever instruction EI encountered: enables interrupts on mmu after the next
+        // instruction. 
+	ei_pending : bool,
+	di_pending : bool,
 
         // debugging
         trace_enabled: bool,
 
         dis : Disassembler,
+
 }
 
 
@@ -530,8 +531,9 @@ impl CPU  {
                 pc : 0,
                 stop_flag : false,
                 halt_flag : false,
-                cycles_to_ei : -1,
-                cycles_to_di : -1,
+                ime: false,
+                ei_pending : false,
+                di_pending : false,
                 trace_enabled: true,
                 dis : Disassembler::from_csv(),
         }
@@ -617,6 +619,7 @@ impl CPU  {
         sp = sp.wrapping_sub(1);
         mmu_ref.set_byte(sp as usize, (val & 0xFF) as u8); // low byte
 
+        println!("STACK PUSH! {:#04x}", val);
         self.set_sp(sp);
     }
 
@@ -679,12 +682,56 @@ impl CPU  {
     }
 
     fn decode_execute(&mut self, mut opcode : u8, mmu_ref : &mut mmu::MMU, cb_prefix : bool) -> u8 {
+
+
+
+
             let i1 = ((opcode & 0xF0) >> 4) as usize;
             let i2 = (opcode & 0x0F) as usize;
-            let cycles : u8 = ternary!(cb_prefix, cpu_tables::cb_prefixed_cycle_times[i1][i2], cpu_tables::cycle_times[i1][i2]);
+            let mut cycles : u8 = ternary!(cb_prefix, cpu_tables::cb_prefixed_cycle_times[i1][i2], cpu_tables::cycle_times[i1][i2]);
             let	instruction_size : u8 = ternary!(cb_prefix, 2, cpu_tables::instruction_sizes[i1][i2]);
-
             let mut skip_increment = false;
+
+            // before anything else, check for interrupts
+            let mut ie_reg = mmu_ref.get_ie();
+            let mut if_reg = mmu_ref.get_if();
+
+            let interrupt_vectors = vec![0x40, 0x48, 0x50, 0x58, 0x60];
+
+            println!("IME: {}", self.ime);
+            println!("IE: {:08b}", mmu_ref.get_byte(0xFFFF as usize));
+            println!("IF: {:08b}", mmu_ref.get_byte(0xFF0F as usize));
+
+            if self.ime && (ie_reg != 0) && (if_reg != 0) {
+                self.ime = false;  
+
+                for i in 0..5 {
+                    let mask = 1 << i;
+
+                    if (ie_reg & mask) != 0 && (if_reg & mask) != 0 {
+                        println!("IN HERE! {}", i);
+                        // Clear the IF bit (acknowledge the interrupt)
+                        if_reg &= !mask;
+                        mmu_ref.set_if(if_reg);
+
+                        // Simulate the cycles: 2 idle + 2 push + 1 jump = 5 cycles
+                        //self.tick(5); // or however you emulate instruction timing
+                        cycles = 5;
+
+                        // Push current PC
+                        self.set_sp(self.get_sp().wrapping_sub(1));
+                        mmu_ref.set_byte(self.get_sp() as usize, (self.pc >> 8) as u8);
+                        self.set_sp(self.get_sp().wrapping_sub(1));
+                        mmu_ref.set_byte(self.get_sp() as usize, (self.pc & 0xFF) as u8);
+
+                        // Jump to the interrupt vector
+                        self.pc = interrupt_vectors[i];
+                        skip_increment = true;
+                        return cycles;
+                    }
+                }
+            }
+
 
             let nn = self.next_word(self.pc+1, mmu_ref);
             let n = self.fetch(self.pc+1, mmu_ref);
@@ -733,7 +780,7 @@ impl CPU  {
                             0x1B => self.e = rr(self.e, &mut self.f),
                             0x1C => self.h = rr(self.h, &mut self.f),
                             0x1D => self.l = rr(self.l, &mut self.f),
-                            0x1E => mmu_ref.set_byte(self.get_hl() as usize, rl(mmu_ref.get_byte(self.get_hl() as usize), &mut self.f)),
+                            0x1E => mmu_ref.set_byte(self.get_hl() as usize, rr(mmu_ref.get_byte(self.get_hl() as usize), &mut self.f)),
                             0x1F => self.a = rr(self.a, &mut self.f),
                             0x20 => self.b = sla(self.b, &mut self.f),
                             0x21 => self.c = sla(self.c, &mut self.f),
@@ -903,7 +950,7 @@ impl CPU  {
                             0xC1 => self.c = self.c | (1 << 0),
                             0xC2 => self.d = self.d | (1 << 0),
                             0xC3 => self.e = self.e | (1 << 0),
-                            0xC4 => self.h = self.f | (1 << 0),
+                            0xC4 => self.h = self.h | (1 << 0),
                             0xC5 => self.l = self.l | (1 << 0),
                             0xC6 => mmu_ref.set_byte(self.get_hl() as usize, mmu_ref.get_byte(self.get_hl() as usize) | (1 << 0)),
                             0xC7 => self.a = self.a | (1 << 0),
@@ -919,7 +966,7 @@ impl CPU  {
                             0xD1 => self.c = self.c | (1 << 2),
                             0xD2 => self.d = self.d | (1 << 2),
                             0xD3 => self.e = self.e | (1 << 2),
-                            0xD4 => self.h = self.f | (1 << 2),
+                            0xD4 => self.h = self.h | (1 << 2),
                             0xD5 => self.l = self.l | (1 << 2),
                             0xD6 => mmu_ref.set_byte(self.get_hl() as usize, mmu_ref.get_byte(self.get_hl() as usize) | (1 << 2)),
                             0xD7 => self.a = self.a | (1 << 2),
@@ -935,7 +982,7 @@ impl CPU  {
                             0xE1 => self.c = self.c | (1 << 4),
                             0xE2 => self.d = self.d | (1 << 4),
                             0xE3 => self.e = self.e | (1 << 4),
-                            0xE4 => self.h = self.f | (1 << 4),
+                            0xE4 => self.h = self.h | (1 << 4),
                             0xE5 => self.l = self.l | (1 << 4),
                             0xE6 => mmu_ref.set_byte(self.get_hl() as usize, mmu_ref.get_byte(self.get_hl() as usize) | (1 << 4)),
                             0xE7 => self.a = self.a | (1 << 4),
@@ -951,7 +998,7 @@ impl CPU  {
                             0xF1 => self.c = self.c | (1 << 6),
                             0xF2 => self.d = self.d | (1 << 6),
                             0xF3 => self.e = self.e | (1 << 6),
-                            0xF4 => self.h = self.f | (1 << 6),
+                            0xF4 => self.h = self.h | (1 << 6),
                             0xF5 => self.l = self.l | (1 << 6),
                             0xF6 => mmu_ref.set_byte(self.get_hl() as usize, mmu_ref.get_byte(self.get_hl() as usize) | (1 << 6)),
                             0xF7 => self.a = self.a | (1 << 6),
@@ -1263,7 +1310,7 @@ impl CPU  {
                             0xC5 => self.stack_push(mmu_ref, self.get_bc()),
                             0xC6 => self.a = add_reg(self.a, n, &mut self.f),
                             0xC7 => {
-                                self.stack_push(mmu_ref, self.pc);
+                                self.stack_push(mmu_ref, self.pc+1);
                                 self.pc = 0x00;
                                 skip_increment = true;
                             },
@@ -1302,7 +1349,7 @@ impl CPU  {
                             },
                             0xCE => self.a = adc_reg(self.a, n, &mut self.f),
                             0xCF => {
-                                self.stack_push(mmu_ref, self.pc);
+                                self.stack_push(mmu_ref, self.pc+1);
                                 self.pc = 0x08;
                                 skip_increment = true;
                             },
@@ -1339,7 +1386,7 @@ impl CPU  {
                             0xD5 => self.stack_push(mmu_ref, self.get_de()),
                             0xD6 => self.a = sub_reg(self.a, n, &mut self.f),
                             0xD7 => {
-                                self.stack_push(mmu_ref, self.pc);
+                                self.stack_push(mmu_ref, self.pc+1);
                                 self.pc = 0x10;
                                 skip_increment = true;
                             },
@@ -1352,7 +1399,7 @@ impl CPU  {
                             0xD9 => {
                                 self.pc = self.stack_pop(mmu_ref);
                                 skip_increment = true;
-                                mmu_ref.enable_interrupts();
+                                self.ime = true;
                             },
                             0xDA => {
                                 if get_flag(&mut self.f, CARRY) {
@@ -1372,7 +1419,7 @@ impl CPU  {
                             0xDD => (),
                             0xDE => self.a = sbc_reg(self.a, n, &mut self.f),
                             0xDF => {
-                                self.stack_push(mmu_ref, self.pc);
+                                self.stack_push(mmu_ref, self.pc+1);
                                 self.pc = 0x18;
                                 skip_increment = true;
                             },
@@ -1384,7 +1431,7 @@ impl CPU  {
                             0xE5 => self.stack_push(mmu_ref, self.get_hl()),
                             0xE6 => and(&mut self.a, n, &mut self.f),
                             0xE7 => {
-                                self.stack_push(mmu_ref, self.pc);
+                                self.stack_push(mmu_ref, self.pc+1);
                                 self.pc = 0x20;
                                 skip_increment = true;
                             },
@@ -1415,19 +1462,19 @@ impl CPU  {
                             0xED => (),
                             0xEE => xor(&mut self.a, n, &mut self.f),
                             0xEF => {
-                                self.stack_push(mmu_ref, self.pc);
+                                self.stack_push(mmu_ref, self.pc+1);
                                 self.pc = 0x28;
                                 skip_increment = true;
                             },
                             0xF0 => self.a = mmu_ref.get_byte((0xFF00 + (n as u16) as usize)),
                             0xF1 => {let af_val = self.stack_pop(mmu_ref); self.set_af(af_val);},
                             0xF2 => self.a = mmu_ref.get_byte((0xFF00 + (self.c as u16) as usize)),
-                            0xF3 => self.cycles_to_di = 2,
+                            0xF3 => self.di_pending = true,
                             0xF4 => (),
                             0xF5 => self.stack_push(mmu_ref, self.get_af()),
                             0xF6 => or(&mut self.a, n, &mut self.f),
                             0xF7 => {
-                                self.stack_push(mmu_ref, self.pc);
+                                self.stack_push(mmu_ref, self.pc+1);
                                 self.pc = 0x30;
                                 skip_increment = true;
                             },
@@ -1451,12 +1498,12 @@ impl CPU  {
                                 self.set_sp(hl);
                             },
                             0xFA => self.a = mmu_ref.get_byte(nn as usize),
-                            0xFB => self.cycles_to_ei = 2, 
+                            0xFB => self.ei_pending = true, 
                             0xFC => (),
                             0xFD => (),
                             0xFE => compare(self.a, n, &mut self.f),
                             0xFF => {
-                                self.stack_push(mmu_ref, self.pc);
+                                self.stack_push(mmu_ref, self.pc+1);
                                 self.pc = 0x38;
                                 skip_increment = true;
                             },
@@ -1472,6 +1519,18 @@ impl CPU  {
                     }
  
             }
+
+
+    if self.ei_pending && !((opcode == 0xFB) && cb_prefix) {
+        self.ime = true;
+        self.ei_pending = false;
+    }
+    if self.di_pending && !((opcode == 0xF3) && cb_prefix) {
+        self.ime = false;
+        self.di_pending = false;
+    }
+
+
     if !skip_increment {
                 self.pc += instruction_size as u16;
     }
@@ -1479,20 +1538,10 @@ impl CPU  {
     if (mmu_ref.get_boot() == 1) {
         self.pc = 0x0100;
         println!("BOOT ROM DONE");
+        // TODO this is a dirty hack. Get a boolean flag or something like that at a minimum
         mmu_ref.set_byte(0xFF50 as usize, 10);
     }
-    /*
-            self.cycles_to_ei -= 1;
-            if self.cycles_to_ei == 0 {
-                    mmu_ref.enable_interrupts();
-                    self.cycles_to_ei = -1;
-            }
-            self.cycles_to_di -= 1;
-            if self.cycles_to_di == 0 {
-                    mmu_ref.enable_interrupts();
-                    self.cycles_to_di = -1;
-            }
-    */
+
     if (mmu_ref.get_byte(0xFF50 as usize) == 10) {
         log_line(&format!(
             "A:{:02X} F:{:02X} B:{:02X} C:{:02X} D:{:02X} E:{:02X} H:{:02X} L:{:02X} SP:{:04X} PC:{:04X} PCMEM:{:02X},{:02X},{:02X},{:02X}",

@@ -108,12 +108,16 @@ impl MMU {
         }
     }
 
-    pub fn enable_interrupts(&mut self) {
-        self.memory[0xFFFF] = 0xFF;
+    pub fn get_ie(&mut self) -> u8 {
+        self.memory[0xFFFF]
     }
 
-    pub fn disable_interrupts(&mut self) {
-        self.memory[0xFFFF] = 0x00;
+    pub fn get_if(&mut self) -> u8 {
+        self.memory[0xFF0F]
+    }
+
+    pub fn set_if(&mut self, new_val : u8) {
+        self.memory[0xFF0F] = new_val;
     }
 
     pub fn map_cartridge_nintendo_logo(&mut self) {
