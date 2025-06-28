@@ -639,9 +639,48 @@ impl CPU  {
         (high_byte as u16) << 8 | (low_byte as u16)
     }
 
+    pub fn update_timers(&mut self, m_cycles : u8, mmu_ref : &mut mmu::MMU) {
+        //let t_cycles : u8 = m_cycles * 4;
+
+        let old_div : u16 = mmu_ref.fetch_div();
+        mmu_ref.increment_div(m_cycles);
+        let new_div : u16 = mmu_ref.fetch_div();
+
+        let tac_reg = mmu_ref.get_byte(0xFF07 as usize);
+        let enabled_bit = tac_reg & 0b100;
+        if !(enabled_bit > 0) {
+            // we don't increment TIMA in this case
+            return;
+        }
+        let clock_select = tac_reg & 0b11;
+        let mut watched_bit : u8 = 0;
+        // TODO go back and understand how this bit mapping works. Why 9,3,5,7 etc.
+        match clock_select {
+            0 => watched_bit = 9,
+            1 => watched_bit = 3,
+            2 => watched_bit = 5,
+            3 => watched_bit = 7,
+            _ => (),
+        }
+
+        let old_bit = (old_div >> watched_bit) & 1;
+        let new_bit = (new_div >> watched_bit) & 1;
+
+        // increment TIMA only on falling edges
+        if old_bit == 1 && new_bit == 0 {
+            mmu_ref.increment_tima();
+        }
+        
+        //println!("DIV {:#04x} CLOCK SELECT {} OLD BIT {} NEW BIT {}", new_div, clock_select, old_bit, new_bit);
+        
+        // TODO go and account for that pain in the ass edge case when you
+        // write to TMA on the same cycle that you overflow TIMA
+    }
+
+
     // performs a F/D/E/WB cycle
     pub fn cycle(&mut self, mmu_ref : &mut mmu::MMU) -> u8 {
-        if self.halt_flag {
+        if self.stop_flag {
             return 0;
         }
 
@@ -663,9 +702,30 @@ impl CPU  {
             println!("[{:#04X}] {}", self.pc, disasm.unwrap_or("???".to_string()));
         }
 
+        let mut cycles : u8 = 0;
 
-        // returns the number of cycles for the current instruction
-        self.decode_execute(next_opcode, mmu_ref, cb_prefix)
+        // TODO handle all halt cases, especially also exiting on reset.
+        // Extremely jank copy/pasting code right now, will clean up later.
+        if self.halt_flag {
+            cycles = 4;
+            // we do not care about IME here
+            let mut ie_reg = mmu_ref.get_ie();
+            let mut if_reg = mmu_ref.get_if();
+            for i in 0..5 {
+                let mask = 1 << i;
+                if (ie_reg & mask) != 0 && (if_reg & mask) != 0 {
+                    self.halt_flag = false;
+                }
+            }
+        }
+        else {
+            // returns the number of cycles for the current instruction
+            cycles = self.decode_execute(next_opcode, mmu_ref, cb_prefix);
+        }
+
+        self.update_timers(cycles, mmu_ref);
+
+        return cycles;
     }
 
 
@@ -682,10 +742,6 @@ impl CPU  {
     }
 
     fn decode_execute(&mut self, mut opcode : u8, mmu_ref : &mut mmu::MMU, cb_prefix : bool) -> u8 {
-
-
-
-
             let i1 = ((opcode & 0xF0) >> 4) as usize;
             let i2 = (opcode & 0x0F) as usize;
             let mut cycles : u8 = ternary!(cb_prefix, cpu_tables::cb_prefixed_cycle_times[i1][i2], cpu_tables::cycle_times[i1][i2]);
@@ -701,12 +757,14 @@ impl CPU  {
             println!("IME: {}", self.ime);
             println!("IE: {:08b}", mmu_ref.get_byte(0xFFFF as usize));
             println!("IF: {:08b}", mmu_ref.get_byte(0xFF0F as usize));
+            println!("TIMA: {:08b}", mmu_ref.get_byte(0xFF05 as usize));
+            println!("TAC: {:08b}", mmu_ref.get_byte(0xFF07 as usize));
 
             if self.ime && (ie_reg != 0) && (if_reg != 0) {
                 self.ime = false;  
 
                 for i in 0..5 {
-                    let mask = 1 << i;
+                    let mask : u8 = 1u8 << i;
 
                     if (ie_reg & mask) != 0 && (if_reg & mask) != 0 {
                         println!("IN HERE! {}", i);
@@ -737,6 +795,7 @@ impl CPU  {
             let n = self.fetch(self.pc+1, mmu_ref);
 
             // PRINT FLAGS FOR DEBUG
+            /*
             println!(
                 "FLAGS before: Z={} N={} H={} C={}",
                 get_flag(&mut self.f, ZERO),
@@ -744,6 +803,7 @@ impl CPU  {
                 get_flag(&mut self.f, HC),
                 get_flag(&mut self.f, CARRY)
             );
+            */
 
 
             if cb_prefix {
@@ -1042,7 +1102,10 @@ impl CPU  {
                             0x0D => self.c = dec_reg(self.c, &mut self.f),
                             0x0E => self.c = n,
                             0x0F => rrca(&mut self.a, &mut self.f),
-                            0x10 => self.stop_flag = true,
+                            0x10 => {
+                                self.stop_flag = true;
+                                mmu_ref.set_byte(0xFF04 as usize, 0);
+                            },
                             0x11 => self.set_de(nn),
                             0x12 => mmu_ref.set_byte(self.get_de() as usize, self.a),
                             0x13 => self.set_de(self.get_de().wrapping_add(1)),
@@ -1521,18 +1584,18 @@ impl CPU  {
             }
 
 
-    if self.ei_pending && !((opcode == 0xFB) && cb_prefix) {
+    if self.ei_pending && !((opcode == 0xFB) && (!cb_prefix)) {
         self.ime = true;
         self.ei_pending = false;
     }
-    if self.di_pending && !((opcode == 0xF3) && cb_prefix) {
+    if self.di_pending && !((opcode == 0xF3) && (!cb_prefix)) {
         self.ime = false;
         self.di_pending = false;
     }
 
 
     if !skip_increment {
-                self.pc += instruction_size as u16;
+        self.pc += instruction_size as u16;
     }
 
     if (mmu_ref.get_boot() == 1) {

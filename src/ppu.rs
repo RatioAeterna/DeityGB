@@ -9,6 +9,13 @@ macro_rules! ternary {
     };
 }
 
+pub enum PpuMode {
+    OAM,      // Mode 2
+    Transfer, // Mode 3
+    HBlank,   // Mode 0
+    VBlank,   // Mode 1
+}
+
 //#[derive(Copy, Clone)]
 pub struct PPU {
     // pixel data to be drawn to screen
@@ -16,6 +23,7 @@ pub struct PPU {
     vblank : bool,
     tilemap_start : usize,
     tiledata_start : usize,
+    accumulated_cycles : u16
 }
 
 impl PPU {
@@ -33,6 +41,7 @@ impl PPU {
             vblank : false,
             tilemap_start : 0x0000,
             tiledata_start : 0x0000,
+
         }
     }
     
@@ -146,6 +155,55 @@ impl PPU {
     }
 
 
+    pub fn cycle(&mut self, cycles: u8) {
+        self.accumulated_cycles = self.accumulated_cycles.wrapping_add(cycles);
+
+        // figure out which MODE we are in
+        match self.mode {
+            OAM => {
+                if self.accumulated_cycles >= 80 {
+                    self.mode = Transfer;
+                    // optionally: fire STAT interrupt if enabled
+                }
+            }
+            Transfer => {
+                if self.accumulated_cycles >= 80 + 172 {
+                    self.mode = HBlank;
+                    // this is where you can render the scanline
+                    // optionally: fire STAT interrupt if enabled
+                }
+            }
+            HBlank => {
+                if self.accumulated_cycles >= 456 {
+                    self.inc_ly(mmu_ref);
+                    self.accumulated_cycles = 0;
+
+                    if self.get_ly(mmu_ref) == 144 {
+                        self.mode = VBlank;
+                        // fire VBlank interrupt
+                    } else {
+                        self.mode = OAM;
+                        // optionally: fire STAT interrupt if enabled
+                    }
+                }
+            }
+            VBlank => {
+                if self.accumulated_cycles >= 456 {
+                    self.inc_ly(mmu_ref);
+                    self.accumulated_cycles = 0;
+
+                    if self.get_ly(mmu_ref) > 153 {
+                        self.inc_ly(mmu_ref) = 0;
+                        self.mode = OAM;
+                        // optionally: fire STAT interrupt if enabled
+                    }
+                }
+            }
+        }
+    }
+
+
+
 
     /* Render a single line of the screen i.e., increment the scanline by ONE,
      * so calls 144 - 153 we're in VBLANK and not drawing anything */
@@ -194,6 +252,7 @@ impl PPU {
 
 
     pub fn reached_vblank(&mut self) -> bool {
+        matches!(self.mode, VBlank)
         return self.vblank;
     }
 

@@ -37,6 +37,7 @@ pub struct MMU {
 	pub memory : Vec<u8>, 
         pub boot_rom : Vec<u8>,
         pub rom_data : Vec<u8>,
+        pub div_internal: u16,
 }
 
 fn echo_ram_sub(addr: usize) -> usize {
@@ -56,14 +57,43 @@ impl MMU {
             memory : vec![0; 0x10000],
             boot_rom : vec![0; 0x0100],
             rom_data : vec![],
+            div_internal : 0,
         }
     }
 
     pub fn set_byte(&mut self, mut addr: usize, data : u8) {
         if echo_ram(addr) { addr = echo_ram_sub(addr); }
-
+        
+        if addr == 0xFF04 { // DIV write resets it
+            self.div_internal = 0;
+        }
         //handle_bank_switch(addr, data);
         self.memory[addr] = data;
+    }
+
+    pub fn increment_div(&mut self, cycles : u8) {
+        self.div_internal = self.div_internal.wrapping_add(cycles as u16); 
+        //println!("DIV INTERNAL: {:#04x}, cycles: {}", self.div_internal, cycles);
+    }
+
+    pub fn increment_tima(&mut self) {
+        // overflow
+        let tima_val = self.memory[0xFF05];
+        if  tima_val == 0xFF {
+            println!("SETTING TIMEROO");
+            self.memory[0xFF05] = self.memory[0xFF06];
+            // request interrupt, turn on timer bit
+            let if_reg = self.get_if();
+            let mod_if_reg = if_reg | 0b00000100;
+            self.set_if(mod_if_reg);
+        }
+        else {
+            self.memory[0xFF05] = tima_val + 1;
+        }
+    }
+
+    pub fn fetch_div(&mut self) -> u16 {
+        return self.div_internal;
     }
 
     /*
@@ -96,8 +126,15 @@ impl MMU {
         if echo_ram(addr) { addr = echo_ram_sub(addr); }
 
         // TODO JUST FOR DEBUGGING WITH GB DOCTOR
+        /*
         if addr == 0xFF44 {
             return 0x90;
+        }
+        */
+
+        // DIV read
+        if addr == 0xFF04 { 
+            return (self.div_internal >> 8) as u8;
         }
 
         if addr < 0x0100 && (self.get_boot() == 0) {
