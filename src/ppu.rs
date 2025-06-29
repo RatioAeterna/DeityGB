@@ -158,9 +158,11 @@ impl PPU {
         let t_cycles = cycles*4;
         self.accumulated_cycles = self.accumulated_cycles.wrapping_add(t_cycles as u16);
 
+        /*
         println!("Accumulated cycles: {}", self.accumulated_cycles);
         println!("MODE: {}", self.mode as u8);
         println!("LY: {}", self.get_ly(mmu_ref));
+        */
 
         // figure out which MODE we are in
         match self.mode {
@@ -175,7 +177,7 @@ impl PPU {
                     self.mode = HBlank;
                     // this is where you can render the scanline
                     // optionally: fire STAT interrupt if enabled
-                    //self.render_line(mmu_ref);
+                    self.render_line(mmu_ref);
                 }
             }
             HBlank => {

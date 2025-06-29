@@ -191,23 +191,22 @@ async fn main() {
                 }
             }
             rendered_yet = true;
+
+            let texture = Texture2D::from_rgba8(160, 144, &screen_bitmap_rgba);
+            texture.set_filter(FilterMode::Nearest);
+            draw_texture_ex(
+                &texture,
+                0.0,
+                0.0,
+                WHITE,
+                DrawTextureParams {
+                    dest_size: Some(vec2(screen_width(), screen_height())),
+                    ..Default::default()
+                },
+            );
+            handle_input(&mut mmu);
+            next_frame().await;
         }
-        let texture = Texture2D::from_rgba8(160, 144, &screen_bitmap_rgba);
-        texture.set_filter(FilterMode::Nearest);
-        draw_texture_ex(
-            &texture,
-            0.0,
-            0.0,
-            WHITE,
-            DrawTextureParams {
-                dest_size: Some(vec2(screen_width(), screen_height())),
-                ..Default::default()
-            },
-        );
-
-        handle_input(&mut mmu);
-
-        next_frame().await
     }
 
 
