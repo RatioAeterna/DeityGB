@@ -754,11 +754,13 @@ impl CPU  {
 
             let interrupt_vectors = vec![0x40, 0x48, 0x50, 0x58, 0x60];
 
+            /*
             println!("IME: {}", self.ime);
             println!("IE: {:08b}", mmu_ref.get_byte(0xFFFF as usize));
             println!("IF: {:08b}", mmu_ref.get_byte(0xFF0F as usize));
             println!("TIMA: {:08b}", mmu_ref.get_byte(0xFF05 as usize));
             println!("TAC: {:08b}", mmu_ref.get_byte(0xFF07 as usize));
+            */
 
             if self.ime && (ie_reg != 0) && (if_reg != 0) {
                 self.ime = false;  

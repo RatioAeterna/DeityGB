@@ -1,4 +1,5 @@
 use crate::mmu as mmu;
+use PpuMode::*;
 
 // TODO inline all the simple functions
 
@@ -9,6 +10,8 @@ macro_rules! ternary {
     };
 }
 
+#[repr(u8)]
+#[derive(Copy, Clone)]
 pub enum PpuMode {
     OAM,      // Mode 2
     Transfer, // Mode 3
@@ -23,7 +26,8 @@ pub struct PPU {
     vblank : bool,
     tilemap_start : usize,
     tiledata_start : usize,
-    accumulated_cycles : u16
+    accumulated_cycles : u16,
+    mode : PpuMode,
 }
 
 impl PPU {
@@ -41,7 +45,8 @@ impl PPU {
             vblank : false,
             tilemap_start : 0x0000,
             tiledata_start : 0x0000,
-
+            accumulated_cycles : 0,
+            mode : OAM,
         }
     }
     
@@ -64,12 +69,6 @@ impl PPU {
         let mut new_val : u8 = prev_val+1;
         if (prev_val >= 153) {
             new_val = 0; 
-            self.vblank = false;
-        }
-        else if (prev_val >= 143) {
-            self.vblank = true;
-            let interrupt_flag = mmu_ref.get_byte(0xFF0F);
-            mmu_ref.set_byte(0xFF0F, interrupt_flag | 0x01);  // Set bit 0 (VBLANK)
         }
         mmu_ref.set_byte(0xFF44 as usize, new_val);
     }
@@ -155,22 +154,28 @@ impl PPU {
     }
 
 
-    pub fn cycle(&mut self, cycles: u8) {
-        self.accumulated_cycles = self.accumulated_cycles.wrapping_add(cycles);
+    pub fn cycle(&mut self, cycles: u8, mmu_ref : &mut mmu::MMU) {
+        let t_cycles = cycles*4;
+        self.accumulated_cycles = self.accumulated_cycles.wrapping_add(t_cycles as u16);
+
+        println!("Accumulated cycles: {}", self.accumulated_cycles);
+        println!("MODE: {}", self.mode as u8);
+        println!("LY: {}", self.get_ly(mmu_ref));
 
         // figure out which MODE we are in
         match self.mode {
             OAM => {
                 if self.accumulated_cycles >= 80 {
                     self.mode = Transfer;
-                    // optionally: fire STAT interrupt if enabled
                 }
+                // optionally: fire STAT interrupt if enabled
             }
             Transfer => {
                 if self.accumulated_cycles >= 80 + 172 {
                     self.mode = HBlank;
                     // this is where you can render the scanline
                     // optionally: fire STAT interrupt if enabled
+                    //self.render_line(mmu_ref);
                 }
             }
             HBlank => {
@@ -181,6 +186,8 @@ impl PPU {
                     if self.get_ly(mmu_ref) == 144 {
                         self.mode = VBlank;
                         // fire VBlank interrupt
+                        let interrupt_flag = mmu_ref.get_byte(0xFF0F);
+                        mmu_ref.set_byte(0xFF0F, interrupt_flag | 0x01);  // Set bit 0 (VBLANK)
                     } else {
                         self.mode = OAM;
                         // optionally: fire STAT interrupt if enabled
@@ -191,9 +198,7 @@ impl PPU {
                 if self.accumulated_cycles >= 456 {
                     self.inc_ly(mmu_ref);
                     self.accumulated_cycles = 0;
-
-                    if self.get_ly(mmu_ref) > 153 {
-                        self.inc_ly(mmu_ref) = 0;
+                    if self.get_ly(mmu_ref) == 0 {
                         self.mode = OAM;
                         // optionally: fire STAT interrupt if enabled
                     }
@@ -209,13 +214,6 @@ impl PPU {
      * so calls 144 - 153 we're in VBLANK and not drawing anything */
 
     pub fn render_line(&mut self, mmu_ref : &mut mmu::MMU)  {
-        if self.vblank {
-            self.inc_ly(mmu_ref);
-            //println!("VBLANK!");
-            return;
-        }
-        //println!("====================");
-		
         let scy = self.get_scy(mmu_ref);
         //println!("SCY: {}", scy);
         let scx = self.get_scx(mmu_ref);
@@ -226,8 +224,6 @@ impl PPU {
         self.tiledata_start = ternary!((lcdc & 0b00010000) != 0, 0x8000, 0x8800);
 
         //println!("Tilemap Start: {:#06X}, Tiledata Start: {:#06X}", self.tilemap_start, self.tiledata_start);
-
-
 
         let ly : u8 = self.get_ly(mmu_ref);
 
@@ -247,13 +243,15 @@ impl PPU {
             let pixel_data : u8 = self.tiledata_fetch_pixel(bg_x as usize, bg_y as usize, tile_id as usize, mmu_ref);
             self.set_screen_pixel(lx, ly, pixel_data); // sets the actual pixel into the screen 
         }
-        self.inc_ly(mmu_ref);
     }
 
 
     pub fn reached_vblank(&mut self) -> bool {
         matches!(self.mode, VBlank)
-        return self.vblank;
+    }
+
+    pub fn reached_oam(&mut self) -> bool {
+        matches!(self.mode, OAM)
     }
 
     pub fn get_buffer(&mut self) -> &mut [u8; 5760] {
