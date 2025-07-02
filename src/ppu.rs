@@ -19,6 +19,22 @@ pub enum PpuMode {
     VBlank,   // Mode 1
 }
 
+
+#[derive(Default, Debug, Clone, Copy)]
+pub struct Sprite {
+    pub y: u8,              // Actual on-screen Y = y - 16
+    pub x: u8,              // Actual on-screen X = x - 8
+    pub tile_index: u8,     // Index into tile data
+    pub attributes: u8,     // Raw attributes byte
+
+    // Parsed attributes:
+    pub priority: bool,     // Bit 7: 0 = in front of BG, 1 = behind BG
+    pub y_flip: bool,       // Bit 6
+    pub x_flip: bool,       // Bit 5
+    pub palette: u8,        // Bit 4: 0 = OBP0, 1 = OBP1
+}
+
+
 //#[derive(Copy, Clone)]
 pub struct PPU {
     // pixel data to be drawn to screen
@@ -28,6 +44,7 @@ pub struct PPU {
     tiledata_start : usize,
     accumulated_cycles : u16,
     mode : PpuMode,
+    sprites : [Sprite; 40],
 }
 
 impl PPU {
@@ -47,6 +64,7 @@ impl PPU {
             tiledata_start : 0x0000,
             accumulated_cycles : 0,
             mode : OAM,
+            sprites : [Sprite::default(); 40],
         }
     }
     
@@ -71,10 +89,16 @@ impl PPU {
             new_val = 0; 
         }
         mmu_ref.set_byte(0xFF44 as usize, new_val);
+        //println!("INCREMENTED LY! NEW VAL {}", new_val);
+        //println!("LYC: {}", self.get_lyc(mmu_ref));
     }
 
     pub fn get_ly(&mut self, mmu_ref : &mut mmu::MMU) -> u8 {
         mmu_ref.get_byte(0xFF44 as usize)
+    }
+
+    pub fn get_lyc(&mut self, mmu_ref : &mut mmu::MMU) -> u8 {
+        mmu_ref.get_byte(0xFF45 as usize)
     }
 
 
@@ -134,7 +158,7 @@ impl PPU {
     // NOTE: pixel_data should be shifted into its particular position.
     // i.e., it should preserve its ordering in the byte.
     // e.g., 0b00001100 -> "the third pixel is black"
-    pub fn set_screen_pixel(&mut self, lx : u8, ly : u8, pixel_data : u8) { 
+    pub fn set_screen_pixel(&mut self, lx : u8, ly : u8, pixel_data : u8, sprite : bool) { 
         // compute which byte offset into the screen buffer corresponds to 'lx'
         // divide by four because there are four pixels per byte
         let x_idx = lx / 4; 
@@ -146,6 +170,13 @@ impl PPU {
         // we also gotta correspondingly shift the raw pixel color into position
         let shifted_pixel_data = pixel_data << ((3-x_offset)*2);
 
+        if sprite {
+            let actual_pixel = shifted_pixel_data & !mask;
+            if actual_pixel == 0 {
+                return;
+            }
+        }
+
         // NOTE: The reason we keep using '40' for stuff here is that there are 4 pixels per byte,
         // and 160 pixels per "row" of the GB screen, so we have 160/4 = 40 bytes per "row"
         //println!("STUFF!! {}, {}, {}", (x_idx as usize + 40 * ly as usize), x_idx, ly);
@@ -153,9 +184,80 @@ impl PPU {
         self.screen[(x_idx as usize + 40*ly as usize) as usize] = (mask & original) | shifted_pixel_data;
     }
 
+    pub fn get_stat(&self, mmu_ref : &mut mmu::MMU) -> u8 {
+        return mmu_ref.get_byte(0xFF41 as usize);
+    }
 
-    pub fn cycle(&mut self, cycles: u8, mmu_ref : &mut mmu::MMU) {
-        let t_cycles = cycles*4;
+    pub fn toggle_stat(&self, bit : u8, value : bool, mmu_ref : &mut mmu::MMU) {
+        let mask = (1 as u8) << bit;
+        let old_stat = mmu_ref.get_byte(0xFF41 as usize);
+        if value {
+            mmu_ref.set_byte(0xFF41, old_stat | mask);
+        }
+        else {
+            mmu_ref.set_byte(0xFF41, old_stat & !mask);
+            //println!("TOGGLE STAT: {:#010b} !MASK: {:#01b}, MASK: {:#01b}", old_stat, !mask, mask);
+        }
+    }
+
+    pub fn toggle_stat_mode(&self, mode : u8, mmu_ref : &mut mmu::MMU) {
+        // TODO when PPU is turned off (??) we need to call this function to set
+        // mode zero
+        assert!(mode >= 0 && mode < 4);
+        let old_stat = mmu_ref.get_byte(0xFF41 as usize);
+        mmu_ref.set_byte(0xFF41, old_stat | mode);
+
+        // trigger STAT interrupt if appropriate
+        match mode {
+            0 => {
+                if (old_stat & 0b00001000) != 0 {
+                    let mut if_reg = mmu_ref.get_if();
+                    if_reg |= 0b10;
+                    mmu_ref.set_if(if_reg);
+                }
+            },
+            1 => {
+                if (old_stat & 0b00010000) != 0 {
+                    let mut if_reg = mmu_ref.get_if();
+                    if_reg |= 0b10;
+                    mmu_ref.set_if(if_reg);
+                }
+            },
+            2 => {
+                if (old_stat & 0b00100000) != 0 {
+                    let mut if_reg = mmu_ref.get_if();
+                    if_reg |= 0b10;
+                    mmu_ref.set_if(if_reg);
+                }
+            },
+            _ => ()
+        }
+    }
+
+    pub fn check_ly_eq_lyc(&mut self, mmu_ref : &mut mmu::MMU) {
+        if self.get_ly(mmu_ref) == self.get_lyc(mmu_ref) {
+            let old_stat = self.get_stat(mmu_ref);
+            self.toggle_stat(2, true, mmu_ref);
+            let new_stat = self.get_stat(mmu_ref);
+            
+            if (old_stat^new_stat != 0) && ((new_stat & 0b01000000) != 0) {
+                let mut if_reg = mmu_ref.get_if();
+                if_reg |= 0b10;
+                mmu_ref.set_if(if_reg);
+                //println!("LY==LYC! {} {}", self.get_ly(mmu_ref), self.get_lyc(mmu_ref));
+            }
+            else {
+                //println!("OLD NEWS LY LYC! {} {}", self.get_ly(mmu_ref), self.get_lyc(mmu_ref));
+                //println!("OLD STAT: {:#010b} NEW STAT: {:#01b}", old_stat, new_stat);
+            }
+        }
+        else {
+            self.toggle_stat(2, false, mmu_ref);
+            //println!("LY!=LYC! {} {}, stat{:#010b}", self.get_ly(mmu_ref), self.get_lyc(mmu_ref), self.get_stat(mmu_ref));
+        }
+    }
+
+    pub fn cycle(&mut self, t_cycles: u8, mmu_ref : &mut mmu::MMU) {
         self.accumulated_cycles = self.accumulated_cycles.wrapping_add(t_cycles as u16);
 
         /*
@@ -164,68 +266,243 @@ impl PPU {
         println!("LY: {}", self.get_ly(mmu_ref));
         */
 
+        self.check_ly_eq_lyc(mmu_ref);
+        
         // figure out which MODE we are in
         match self.mode {
             OAM => {
                 if self.accumulated_cycles >= 80 {
                     self.mode = Transfer;
+                    self.toggle_stat_mode(3, mmu_ref);
+                    //mmu_ref.toggle_vram_ban(true);
+                    return;
                 }
-                // optionally: fire STAT interrupt if enabled
+                
+                for i in 0..40 {
+                    let index : u8 = i as u8 * 4;
+                    let y      = mmu_ref.get_oam(index);
+                    let x      = mmu_ref.get_oam(index + 1);
+                    let tile   = mmu_ref.get_oam(index + 2);
+                    let attr   = mmu_ref.get_oam(index + 3);
+
+                    self.sprites[i] = Sprite {
+                        y,
+                        x,
+                        tile_index: tile,
+                        attributes: attr,
+                        priority: (attr & 0x80) != 0,
+                        y_flip:   (attr & 0x40) != 0,
+                        x_flip:   (attr & 0x20) != 0,
+                        palette:  (attr & 0x10) >> 4,
+                    };
+                }
             }
             Transfer => {
                 if self.accumulated_cycles >= 80 + 172 {
                     self.mode = HBlank;
+                    //self.toggle_stat_mode(0, mmu_ref);
+
                     // this is where you can render the scanline
                     // optionally: fire STAT interrupt if enabled
                     self.render_line(mmu_ref);
+                    self.render_sprite_line(mmu_ref);
+                    self.render_window_line(mmu_ref);
+
+                    //mmu_ref.toggle_vram_ban(false);
+                    //mmu_ref.toggle_oam_ban(false);
+                    return;
                 }
             }
             HBlank => {
                 if self.accumulated_cycles >= 456 {
                     self.inc_ly(mmu_ref);
+                    //self.check_ly_eq_lyc(mmu_ref);
                     self.accumulated_cycles = 0;
 
                     if self.get_ly(mmu_ref) == 144 {
                         self.mode = VBlank;
+                        self.toggle_stat_mode(1, mmu_ref);
+
                         // fire VBlank interrupt
                         let interrupt_flag = mmu_ref.get_byte(0xFF0F);
                         mmu_ref.set_byte(0xFF0F, interrupt_flag | 0x01);  // Set bit 0 (VBLANK)
+                        return;
                     } else {
                         self.mode = OAM;
-                        // optionally: fire STAT interrupt if enabled
+                        self.toggle_stat_mode(2, mmu_ref);
+
+                        //mmu_ref.toggle_oam_ban(true);
+                        return;
                     }
                 }
             }
             VBlank => {
                 if self.accumulated_cycles >= 456 {
                     self.inc_ly(mmu_ref);
+                    //self.check_ly_eq_lyc(mmu_ref);
                     self.accumulated_cycles = 0;
                     if self.get_ly(mmu_ref) == 0 {
                         self.mode = OAM;
-                        // optionally: fire STAT interrupt if enabled
+                        self.toggle_stat_mode(2, mmu_ref);
+                        return;
                     }
                 }
             }
         }
     }
 
+    fn apply_palette_to_four_pixels(&mut self, four_pixels: u8, palette: u8) -> u8 {
+       let mut result = 0u8;
+       
+       for i in 0..4 {
+           // Extract 2-bit pixel value
+           let shift = i * 2;
+           let pixel_value = (four_pixels >> shift) & 0b11;
+           
+           // Apply palette lookup
+           let palette_shift = pixel_value * 2;
+           let final_pixel = (palette >> palette_shift) & 0b11;
+           
+           // Put the result back in the same position
+           result |= final_pixel << shift;
+       }
+       
+       result
+    }
+
+
+    pub fn render_sprite_line(&mut self, mmu_ref : &mut mmu::MMU) {
+        let lcdc = self.get_lcdc(mmu_ref);
+        let obj_enabled = lcdc & 0b10 != 0;
+        if !obj_enabled {
+            return;
+        }
+
+        let ly : u8 = self.get_ly(mmu_ref);
+
+        let obj_size_flag = (lcdc >> 2) & 1;
+        let sprite_height = if obj_size_flag == 1 { 16 } else { 8 };
+
+        let mut sprites_drawn = 0;
+
+        let sprites = self.sprites.clone();
+
+        for (i, sprite) in sprites.iter().enumerate() {
+            let sprite_y : u8 = sprite.y - 16;
+            let sprite_x : u8 = sprite.x - 8;
+
+            let obp = sprite.palette;
+            let mut palette : u8;
+            if obp != 0 {
+                palette = mmu_ref.get_byte(0xFF49 as usize);
+            }
+            else {
+                palette = mmu_ref.get_byte(0xFF48 as usize);
+            }
+
+            if (ly >= sprite_y) && (ly < sprite_y + sprite_height) {
+                let tile_id = sprite.tile_index;
+                let scy = self.get_scy(mmu_ref);
+                let scx = self.get_scx(mmu_ref);
+
+                for fake_lx in sprite_x..(sprite_x+8) {
+                    //let bg_x = ((scx as u16 + fake_lx as u16) % 256) as u8;
+                    //let bg_y = ((scy as u16 + ly as u16) % 256) as u8;
+
+                    let tile_x = if sprite.x_flip { 7 - fake_lx } else { fake_lx };
+                    let tile_y = if sprite.y_flip { 7 - ly } else { ly };
+
+                    //let pixel_data : u8 = self.tiledata_fetch_pixel(bg_x as usize, bg_y as usize, tile_id as usize, mmu_ref);
+                    let pixel_data : u8 = self.tiledata_fetch_pixel(tile_x as usize, tile_y as usize, tile_id as usize, mmu_ref);
+                    let colored_pixel_data : u8 = self.apply_palette_to_four_pixels(pixel_data, palette);
+                    self.set_screen_pixel(fake_lx, ly, colored_pixel_data, true); // sets the actual pixel into the screen 
+                }
+                sprites_drawn += 1;
+                if sprites_drawn == 10 {
+                    return;
+                }
+            }
+        }
+    }
+
+
+    pub fn render_window_line(&mut self, mmu_ref : &mut mmu::MMU)  {
+        let lcdc = self.get_lcdc(mmu_ref);
+
+        let lcdc = self.get_lcdc(mmu_ref);
+        let window_enabled = lcdc & 0x20 != 0;
+        if !window_enabled {
+            return;
+        }
+
+        let scy = self.get_scy(mmu_ref);
+        let scx = self.get_scx(mmu_ref);
+
+
+        self.tilemap_start = ternary!((lcdc & 0b01000000) != 0, 0x9800, 0x9C00);
+        self.tiledata_start = ternary!((lcdc & 0b00010000) != 0, 0x8000, 0x8800);
+
+        //println!("Tilemap Start: {:#06X}, Tiledata Start: {:#06X}", self.tilemap_start, self.tiledata_start);
+
+        let ly : u8 = self.get_ly(mmu_ref);
+
+        let mut wx : u8 = mmu_ref.get_byte(0xFF4B as usize);
+        let mut wy : u8 = mmu_ref.get_byte(0xFF4A as usize);
+
+        if (ly < wy) || (wx > 166) || (wy > 143) {
+            return;
+        }
+
+        println!("WINDOW Y LINE: {}", wy);
+        println!("WINDOW X LINE: {}", wx);
+
+        // FOR EACH PIXEL
+        // draw the actual line into the screen buffer by fetching tiles
+        for fake_lx in std::cmp::max(0,wx)..160 {
+
+            // first, fetch tile map associated with that pixel by indexing using scx, scy, lx, ly
+            // next, index into tile data to get the TILE data: we can mod the coordinates by 8 to
+            // get the actual byte that we want
+
+            let bg_x = ((scx as u16 + fake_lx as u16) % 256) as u8;
+            let bg_y = ((scy as u16 + ly as u16) % 256) as u8;
+
+            // first, index into the tilemap using bg_x and bg_y
+            let tile_id : u8 = self.tilemap_fetch_id((bg_x / 8) as usize, (bg_y / 8) as usize, mmu_ref);
+            let pixel_data : u8 = self.tiledata_fetch_pixel(bg_x as usize, bg_y as usize, tile_id as usize, mmu_ref);
+            self.set_screen_pixel(fake_lx, ly, pixel_data, false); // sets the actual pixel into the screen 
+        }
+    }
+
+
 
 
 
     /* Render a single line of the screen i.e., increment the scanline by ONE,
      * so calls 144 - 153 we're in VBLANK and not drawing anything */
-
     pub fn render_line(&mut self, mmu_ref : &mut mmu::MMU)  {
+        let lcdc = self.get_lcdc(mmu_ref);
+        let bg_enabled = lcdc & 0x01 != 0;
+
+        if !bg_enabled {
+            let ly : u8 = self.get_ly(mmu_ref);
+            for lx in 0..160 {
+                self.set_screen_pixel(lx, ly, 0b00000000, false);
+            }
+            return;
+        }
+
+
         let scy = self.get_scy(mmu_ref);
-        //println!("SCY: {}", scy);
         let scx = self.get_scx(mmu_ref);
 
-        let lcdc = self.get_lcdc(mmu_ref);
 
         self.tilemap_start = ternary!((lcdc & 0b00001000) != 0, 0x9C00, 0x9800);
         self.tiledata_start = ternary!((lcdc & 0b00010000) != 0, 0x8000, 0x8800);
 
         //println!("Tilemap Start: {:#06X}, Tiledata Start: {:#06X}", self.tilemap_start, self.tiledata_start);
+
+        let palette : u8 = mmu_ref.get_byte(0xFF47);
 
         let ly : u8 = self.get_ly(mmu_ref);
 
@@ -243,7 +520,8 @@ impl PPU {
             // first, index into the tilemap using bg_x and bg_y
             let tile_id : u8 = self.tilemap_fetch_id((bg_x / 8) as usize, (bg_y / 8) as usize, mmu_ref);
             let pixel_data : u8 = self.tiledata_fetch_pixel(bg_x as usize, bg_y as usize, tile_id as usize, mmu_ref);
-            self.set_screen_pixel(lx, ly, pixel_data); // sets the actual pixel into the screen 
+            let colored_pixel_data : u8 = self.apply_palette_to_four_pixels(pixel_data, palette);
+            self.set_screen_pixel(lx, ly, pixel_data, false); // sets the actual pixel into the screen 
         }
     }
 

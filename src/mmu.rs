@@ -38,6 +38,9 @@ pub struct MMU {
         pub boot_rom : Vec<u8>,
         pub rom_data : Vec<u8>,
         pub div_internal: u16,
+
+        pub vram_banned : bool,
+        pub oam_banned : bool,
 }
 
 fn echo_ram_sub(addr: usize) -> usize {
@@ -58,11 +61,21 @@ impl MMU {
             boot_rom : vec![0; 0x0100],
             rom_data : vec![],
             div_internal : 0,
+
+            vram_banned : false,
+            oam_banned : false,
         }
     }
 
     pub fn set_byte(&mut self, mut addr: usize, data : u8) {
         if echo_ram(addr) { addr = echo_ram_sub(addr); }
+
+        if self.vram_banned && (addr >= 0x8000) && (addr <= 0x9FFF) {
+            return;
+        }
+        if self.oam_banned && (addr >= 0xFE00) && (addr <= 0xFE9F) {
+            return;
+        }
         
         if addr == 0xFF04 { // DIV write resets it
             self.div_internal = 0;
@@ -112,6 +125,13 @@ impl MMU {
     pub fn set_word(&mut self, mut addr: usize, data: u16) {
         if echo_ram(addr) { addr = echo_ram_sub(addr); }
 
+        if self.vram_banned && (addr >= 0x8000) && (addr <= 0x9FFF) {
+            return;
+        }
+        if self.oam_banned && (addr >= 0xFE00) && (addr <= 0xFE9F) {
+            return;
+        }
+
         self.memory[addr] = (data & 0x00FF) as u8;
         self.memory[addr + 1] = (data >> 8) as u8;
     }
@@ -122,15 +142,44 @@ impl MMU {
         self.memory[0xFF50]
     }
 
+    
+    pub fn get_oam(&self, index : u8) -> u8 {
+        let addr : usize = (0xFE00 + index as u16).into(); 
+        return self.memory[addr];
+    }
+
+
+    pub fn toggle_vram_ban(&mut self, val : bool) {
+        self.vram_banned = val;
+    }
+
+    pub fn toggle_oam_ban(&mut self, val : bool) {
+        self.oam_banned = val;
+    }
+
     pub fn get_byte(&self, mut addr: usize) -> u8 {
         if echo_ram(addr) { addr = echo_ram_sub(addr); }
 
         // TODO JUST FOR DEBUGGING WITH GB DOCTOR
+
+        if addr == 0xFF4D {
+            return 0xFF;
+        }
+
         /*
         if addr == 0xFF44 {
             return 0x90;
         }
         */
+
+        if self.vram_banned && (addr >= 0x8000) && (addr <= 0x9FFF) {
+            return 0xFF;
+        }
+        if self.oam_banned && (addr >= 0xFE00) && (addr <= 0xFE9F) {
+            return 0xFF;
+        }
+
+
 
         // DIV read
         if addr == 0xFF04 { 

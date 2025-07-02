@@ -14,7 +14,7 @@ fn log_line(s: &str) {
 
     writeln!(file, "{}", s).unwrap();
     file.flush().unwrap();
-    println!("STR: {}", s);
+    println!("{}", s);
 }
 
 macro_rules! ternary {
@@ -700,6 +700,7 @@ impl CPU  {
 
             let disasm = self.dis.lookup(next_opcode, cb_prefix, n, nn);
             println!("[{:#04X}] {}", self.pc, disasm.unwrap_or("???".to_string()));
+            println!("ZERO FLAG: {}", (self.f & 0b10000000) != 0);
         }
 
         let mut cycles : u8 = 0;
@@ -707,6 +708,10 @@ impl CPU  {
         // TODO handle all halt cases, especially also exiting on reset.
         // Extremely jank copy/pasting code right now, will clean up later.
         if self.halt_flag {
+            println!("HALTED");
+            println!("IME: {}", self.ime);
+            println!("IE: {:08b}", mmu_ref.get_byte(0xFFFF as usize));
+            println!("IF: {:08b}", mmu_ref.get_byte(0xFF0F as usize));
             cycles = 4;
             // we do not care about IME here
             let mut ie_reg = mmu_ref.get_ie();
@@ -763,8 +768,6 @@ impl CPU  {
             */
 
             if self.ime && (ie_reg != 0) && (if_reg != 0) {
-                self.ime = false;  
-
                 for i in 0..5 {
                     let mask : u8 = 1u8 << i;
 
@@ -787,6 +790,8 @@ impl CPU  {
                         // Jump to the interrupt vector
                         self.pc = interrupt_vectors[i];
                         skip_increment = true;
+
+                        self.ime = false;  
                         return cycles;
                     }
                 }
@@ -1465,6 +1470,7 @@ impl CPU  {
                                 self.pc = self.stack_pop(mmu_ref);
                                 skip_increment = true;
                                 self.ime = true;
+                                println!("EXECUTING RETI, IME NOW: {}", self.ime);
                             },
                             0xDA => {
                                 if get_flag(&mut self.f, CARRY) {
