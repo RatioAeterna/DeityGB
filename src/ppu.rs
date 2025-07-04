@@ -154,6 +154,37 @@ impl PPU {
         return pixel_value;
     }
 
+    pub fn tiledata_fetch_pixel_signed(&mut self, x: usize, y: usize, tile_id: isize, mmu_ref : &mut mmu::MMU) -> u8 {
+
+        let actual_tiledata_start : isize = 0x9000;
+
+        // Tells us "how many bytes into the tile data do we go, for the full data of this particular
+        // tile?"
+        let tile_offset = (16 as isize) * tile_id;
+
+        // First, we answer this question: "What row of the tile do we care about"
+        let row = y % 8;
+
+        let addr_raw = actual_tiledata_start + tile_offset;
+        let orig_tile_offset = 16*tile_id;
+
+        let addr = actual_tiledata_start + tile_offset + (2*row) as isize;
+        let tile_row_part_1 = mmu_ref.get_byte(addr as usize);
+
+        println!("TILE ID {:#04X}, found at: {:#04X}, tile offset: {}, supposed to be: {}", tile_id, addr_raw, tile_offset, orig_tile_offset);
+
+        let addr = actual_tiledata_start + tile_offset + (2*row+1) as isize;
+        let tile_row_part_2 = mmu_ref.get_byte(addr as usize);
+
+
+        let col = x % 8;
+        let pixel_lower_bit = (tile_row_part_1 & (0b10000000 >> col)) >> (7 - col);
+        let pixel_upper_bit = (tile_row_part_2 & (0b10000000 >> col)) >> (7 - col);
+        let pixel_value = (pixel_upper_bit << 1) | pixel_lower_bit;
+
+        return pixel_value;
+    }
+
     
     // NOTE: pixel_data should be shifted into its particular position.
     // i.e., it should preserve its ordering in the byte.
@@ -306,7 +337,7 @@ impl PPU {
                     // optionally: fire STAT interrupt if enabled
                     self.render_line(mmu_ref);
                     self.render_sprite_line(mmu_ref);
-                    self.render_window_line(mmu_ref);
+                    //self.render_window_line(mmu_ref);
 
                     //mmu_ref.toggle_vram_ban(false);
                     //mmu_ref.toggle_oam_ban(false);
@@ -469,7 +500,9 @@ impl PPU {
 
             // first, index into the tilemap using bg_x and bg_y
             let tile_id : u8 = self.tilemap_fetch_id((bg_x / 8) as usize, (bg_y / 8) as usize, mmu_ref);
+
             let pixel_data : u8 = self.tiledata_fetch_pixel(bg_x as usize, bg_y as usize, tile_id as usize, mmu_ref);
+
             self.set_screen_pixel(fake_lx, ly, pixel_data, false); // sets the actual pixel into the screen 
         }
     }
@@ -500,6 +533,8 @@ impl PPU {
         self.tilemap_start = ternary!((lcdc & 0b00001000) != 0, 0x9C00, 0x9800);
         self.tiledata_start = ternary!((lcdc & 0b00010000) != 0, 0x8000, 0x8800);
 
+        let signed_tiledata_indices : bool = self.tiledata_start == 0x8800;
+
         //println!("Tilemap Start: {:#06X}, Tiledata Start: {:#06X}", self.tilemap_start, self.tiledata_start);
 
         let palette : u8 = mmu_ref.get_byte(0xFF47);
@@ -519,7 +554,18 @@ impl PPU {
 
             // first, index into the tilemap using bg_x and bg_y
             let tile_id : u8 = self.tilemap_fetch_id((bg_x / 8) as usize, (bg_y / 8) as usize, mmu_ref);
-            let pixel_data : u8 = self.tiledata_fetch_pixel(bg_x as usize, bg_y as usize, tile_id as usize, mmu_ref);
+
+            let pixel_data : u8;
+
+            if signed_tiledata_indices {
+                let signed_tile_id : isize = tile_id as isize;
+                pixel_data = self.tiledata_fetch_pixel_signed(bg_x as usize, bg_y as usize, signed_tile_id, mmu_ref);
+            }
+            else {
+                pixel_data = self.tiledata_fetch_pixel(bg_x as usize, bg_y as usize, tile_id as usize, mmu_ref);
+            }
+
+            //let pixel_data : u8 = self.tiledata_fetch_pixel(bg_x as usize, bg_y as usize, tile_id as usize, mmu_ref);
             let colored_pixel_data : u8 = self.apply_palette_to_four_pixels(pixel_data, palette);
             self.set_screen_pixel(lx, ly, pixel_data, false); // sets the actual pixel into the screen 
         }
