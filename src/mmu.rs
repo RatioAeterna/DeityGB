@@ -70,6 +70,10 @@ impl MMU {
     pub fn set_byte(&mut self, mut addr: usize, data : u8) {
         if echo_ram(addr) { addr = echo_ram_sub(addr); }
 
+        if addr == 0xFF4D {
+            println!("FORBIDDEN. VAL {}", data);
+        }
+
         if self.vram_banned && (addr >= 0x8000) && (addr <= 0x9FFF) {
             return;
         }
@@ -93,7 +97,7 @@ impl MMU {
         // overflow
         let tima_val = self.memory[0xFF05];
         if  tima_val == 0xFF {
-            println!("SETTING TIMEROO");
+            //println!("SETTING TIMEROO");
             self.memory[0xFF05] = self.memory[0xFF06];
             // request interrupt, turn on timer bit
             let if_reg = self.get_if();
@@ -123,6 +127,12 @@ impl MMU {
 
 
     pub fn set_word(&mut self, mut addr: usize, data: u16) {
+
+        if addr == 0xFF4D {
+            println!("FORBIDDEN. VAL {}", data);
+        }
+
+
         if echo_ram(addr) { addr = echo_ram_sub(addr); }
 
         if self.vram_banned && (addr >= 0x8000) && (addr <= 0x9FFF) {
@@ -163,6 +173,10 @@ impl MMU {
         // TODO JUST FOR DEBUGGING WITH GB DOCTOR
 
         if addr == 0xFF4D {
+            return 0xFF;
+        }
+
+        if addr == 0xFF00 {
             return 0xFF;
         }
 

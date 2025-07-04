@@ -14,7 +14,7 @@ fn log_line(s: &str) {
 
     writeln!(file, "{}", s).unwrap();
     file.flush().unwrap();
-    println!("{}", s);
+    //println!("{}", s);
 }
 
 macro_rules! ternary {
@@ -619,14 +619,14 @@ impl CPU  {
         sp = sp.wrapping_sub(1);
         mmu_ref.set_byte(sp as usize, (val & 0xFF) as u8); // low byte
 
-        println!("STACK PUSH! {:#04x}", val);
+        //println!("STACK PUSH! {:#04x}", val);
         self.set_sp(sp);
     }
 
     // pops a word off the stack, increments sp
     fn stack_pop(&mut self, mmu_ref : &mut mmu::MMU) -> u16 {
         let mut sp = self.get_sp() as usize;
-        println!("sp_val: {:#04x}", self.get_sp());
+        //println!("sp_val: {:#04x}", self.get_sp());
 
         let low_byte = mmu_ref.get_byte(sp);
         sp = sp.wrapping_add(1);
@@ -700,7 +700,6 @@ impl CPU  {
 
             let disasm = self.dis.lookup(next_opcode, cb_prefix, n, nn);
             println!("[{:#04X}] {}", self.pc, disasm.unwrap_or("???".to_string()));
-            println!("ZERO FLAG: {}", (self.f & 0b10000000) != 0);
         }
 
         let mut cycles : u8 = 0;
@@ -708,10 +707,12 @@ impl CPU  {
         // TODO handle all halt cases, especially also exiting on reset.
         // Extremely jank copy/pasting code right now, will clean up later.
         if self.halt_flag {
+            /*
             println!("HALTED");
             println!("IME: {}", self.ime);
             println!("IE: {:08b}", mmu_ref.get_byte(0xFFFF as usize));
             println!("IF: {:08b}", mmu_ref.get_byte(0xFF0F as usize));
+            */
             cycles = 4;
             // we do not care about IME here
             let mut ie_reg = mmu_ref.get_ie();
@@ -772,7 +773,7 @@ impl CPU  {
                     let mask : u8 = 1u8 << i;
 
                     if (ie_reg & mask) != 0 && (if_reg & mask) != 0 {
-                        println!("IN HERE! {}", i);
+                        //println!("IN HERE! {}", i);
                         // Clear the IF bit (acknowledge the interrupt)
                         if_reg &= !mask;
                         mmu_ref.set_if(if_reg);
@@ -1391,9 +1392,9 @@ impl CPU  {
                                 }
                             },
                             0xC9 => { 
-                                println!("RETURN!!\n"); 
+                                //println!("RETURN!!\n"); 
                                 self.pc = self.stack_pop(mmu_ref);
-                                println!("pc val: {:#04x}", self.pc);
+                                //println!("pc val: {:#04x}", self.pc);
                                 skip_increment = true;
                             },
                             0xCA => {
@@ -1470,7 +1471,7 @@ impl CPU  {
                                 self.pc = self.stack_pop(mmu_ref);
                                 skip_increment = true;
                                 self.ime = true;
-                                println!("EXECUTING RETI, IME NOW: {}", self.ime);
+                                //println!("EXECUTING RETI, IME NOW: {}", self.ime);
                             },
                             0xDA => {
                                 if get_flag(&mut self.f, CARRY) {

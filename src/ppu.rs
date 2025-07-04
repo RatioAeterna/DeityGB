@@ -453,8 +453,8 @@ impl PPU {
             return;
         }
 
-        println!("WINDOW Y LINE: {}", wy);
-        println!("WINDOW X LINE: {}", wx);
+        //println!("WINDOW Y LINE: {}", wy);
+        //println!("WINDOW X LINE: {}", wx);
 
         // FOR EACH PIXEL
         // draw the actual line into the screen buffer by fetching tiles
