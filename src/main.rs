@@ -30,40 +30,48 @@ fn handle_input(mmu: &mut mmu::MMU) {
     // Reset lower 4 bits
     joypad_state |= 0x0F;
 
-    if is_key_down(KeyCode::W) {
-        joypad_state &= !0b00000100; // Up
-        //println!("UP");
+    let select_buttons = (joypad_state & 0b00100000) == 0;
+    let select_dpad = (joypad_state & 0b00010000) == 0;
+
+
+    if select_dpad {
+        if is_key_down(KeyCode::W) {
+            joypad_state &= !0b00000100; // Up
+            println!("UP");
+        }
+        if is_key_down(KeyCode::A) {
+            joypad_state &= !0b00000010; // Left
+            println!("LEFT");
+        }
+        if is_key_down(KeyCode::S) {
+            joypad_state &= !0b00001000; // Down
+            println!("DOWN");
+        }
+        if is_key_down(KeyCode::D) {
+            joypad_state &= !0b00000001; // Right
+            println!("RIGHT");
+        }
     }
-    if is_key_down(KeyCode::A) {
-        joypad_state &= !0b00000010; // Left
-        //println!("LEFT");
-    }
-    if is_key_down(KeyCode::S) {
-        joypad_state &= !0b00001000; // Down
-        //println!("DOWN");
-    }
-    if is_key_down(KeyCode::D) {
-        joypad_state &= !0b00000001; // Right
-        //println!("RIGHT");
-    }
-    if is_key_down(KeyCode::J) {
-        joypad_state &= !0b00000001; // A
-        //println!("A");
-    }
-    if is_key_down(KeyCode::K) {
-        joypad_state &= !0b00000010; // B
-        //println!("B");
-    }
-    if is_key_down(KeyCode::LeftShift) {
-        joypad_state &= !0b00000100; // Select
-        //println!("SELECT");
-    }
-    if is_key_down(KeyCode::Enter) {
-        joypad_state &= !0b00001000; // Start
-        //println!("START");
+    if select_buttons {
+        if is_key_down(KeyCode::J) {
+            joypad_state &= !0b00000001; // A
+            println!("A");
+        }
+        if is_key_down(KeyCode::K) {
+            joypad_state &= !0b00000010; // B
+            println!("B");
+        }
+        if is_key_down(KeyCode::LeftShift) {
+            joypad_state &= !0b00000100; // Select
+            println!("SELECT");
+        }
+        if is_key_down(KeyCode::Enter) {
+            joypad_state &= !0b00001000; // Start
+            println!("START");
+        }
     }
 
-    mmu.set_byte(joypad_reg, joypad_state);
+    mmu.set_joypad_state(joypad_state);
 }
 
 pub fn load_file_bytes(path: &str) -> Vec<u8> {

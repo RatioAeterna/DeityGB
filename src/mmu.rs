@@ -41,6 +41,8 @@ pub struct MMU {
 
         pub vram_banned : bool,
         pub oam_banned : bool,
+
+        pub joypad_state : u8,
 }
 
 fn echo_ram_sub(addr: usize) -> usize {
@@ -64,11 +66,22 @@ impl MMU {
 
             vram_banned : false,
             oam_banned : false,
+            joypad_state : 0xCF,
         }
+    }
+
+
+    pub fn set_joypad_state(&mut self, data : u8) {
+        self.joypad_state = data;
     }
 
     pub fn set_byte(&mut self, mut addr: usize, data : u8) {
         if echo_ram(addr) { addr = echo_ram_sub(addr); }
+
+        if addr < 0x8000 {
+            println!("ROM WRITE");
+            return;
+        }
 
         if addr == 0xFF4D {
             println!("FORBIDDEN. VAL {}", data);
@@ -132,6 +145,10 @@ impl MMU {
             println!("FORBIDDEN. VAL {}", data);
         }
 
+        if addr < 0x8000 {
+            println!("ROM WRITE");
+            return;
+        }
 
         if echo_ram(addr) { addr = echo_ram_sub(addr); }
 
@@ -177,7 +194,7 @@ impl MMU {
         }
 
         if addr == 0xFF00 {
-            return 0xFF;
+            return self.joypad_state;
         }
 
         /*
