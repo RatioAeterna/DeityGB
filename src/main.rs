@@ -141,7 +141,6 @@ async fn main() {
     let mut fps_display = String::new();
 
 
-
     let mut rendered_yet : bool = false;
     // Used to keep track of whether we have completed our *one* (1) per-frame render during
     // the vblank period of this frame, yet.
@@ -157,6 +156,7 @@ async fn main() {
         // After accumulating 456 cycles, we render a single line with the PPU.
         // Once 144 lines are rendered, we enter VBlank, where we can safely copy the screen buffer to display it.
         let cycles = cpu.cycle(&mut mmu);
+        println!("CYCLES: {}, rendered_yet: {}", cycles, rendered_yet);
         ppu.cycle(cycles, &mut mmu);
 
         if ppu.reached_vblank() && !rendered_yet {

@@ -75,7 +75,7 @@ impl MMU {
     pub fn is_cgb_register(&self, addr : usize) -> bool {
         matches!(
             addr,
-            0xFF4C | 0xFF4F
+            0xFF4C..=0xFF4F
             | 0xFF51..=0xFF56
             | 0xFF68..=0xFF6C
             | 0xFF6C
@@ -210,6 +210,7 @@ impl MMU {
         if echo_ram(addr) { addr = echo_ram_sub(addr); }
 
         if self.is_cgb_register(addr) {
+            println!("TRYING TO READ : {:#04x}", addr);
             return 0xFF;
         }
 

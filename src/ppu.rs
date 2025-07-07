@@ -12,7 +12,7 @@ macro_rules! ternary {
 }
 
 #[repr(u8)]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub enum PpuMode {
     OAM,      // Mode 2
     Transfer, // Mode 3
@@ -304,6 +304,8 @@ impl PPU {
     pub fn cycle(&mut self, t_cycles: u8, mmu_ref : &mut mmu::MMU) {
         self.accumulated_cycles = self.accumulated_cycles.wrapping_add(t_cycles as u16);
 
+        let ly = self.get_ly(mmu_ref);
+        println!("ACCUMULATED CYCLES: {}, ly: {}, mode: {:?}", self.accumulated_cycles, ly, self.mode);
         self.check_ly_eq_lyc(mmu_ref);
         
         // figure out which MODE we are in
@@ -355,7 +357,10 @@ impl PPU {
                 if self.accumulated_cycles >= 456 {
                     self.inc_ly(mmu_ref);
                     //self.check_ly_eq_lyc(mmu_ref);
-                    self.accumulated_cycles = 0;
+                    // TODO we should probably subtract instead of just set to zero. In the other
+                    // spot too.
+                    //self.accumulated_cycles = 0;
+                    self.accumulated_cycles -= 456;
 
                     if self.get_ly(mmu_ref) == 144 {
                         self.mode = VBlank;
@@ -378,7 +383,8 @@ impl PPU {
                 if self.accumulated_cycles >= 456 {
                     self.inc_ly(mmu_ref);
                     //self.check_ly_eq_lyc(mmu_ref);
-                    self.accumulated_cycles = 0;
+                    //self.accumulated_cycles = 0;
+                    self.accumulated_cycles -= 456;
                     if self.get_ly(mmu_ref) == 0 {
                         self.mode = OAM;
                         self.toggle_stat_mode(2, mmu_ref);

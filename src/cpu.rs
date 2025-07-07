@@ -534,7 +534,7 @@ impl CPU  {
                 ime: false,
                 ei_pending : false,
                 di_pending : false,
-                trace_enabled: true,
+                trace_enabled: false,
                 dis : Disassembler::from_csv(),
         }
     }
@@ -761,11 +761,11 @@ impl CPU  {
             /*
             println!("IME: {}", self.ime);
             println!("IE: {:08b}", mmu_ref.get_byte(0xFFFF as usize));
-            */
             println!("IF: {:08b}", mmu_ref.get_byte(0xFF0F as usize));
             //println!("TIMA: {:08b}", mmu_ref.get_byte(0xFF05 as usize));
             println!("TIMA: {}", mmu_ref.get_byte(0xFF05 as usize));
             println!("TAC: {:08b}", mmu_ref.get_byte(0xFF07 as usize));
+            */
 
             if self.ime && (ie_reg != 0) && (if_reg != 0) {
                 for i in 0..5 {
@@ -1636,7 +1636,7 @@ impl CPU  {
         mmu_ref.set_byte(0xFF50 as usize, 10);
     }
 
-    if (mmu_ref.get_byte(0xFF50 as usize) == 10) {
+    if ((mmu_ref.get_byte(0xFF50 as usize) == 10) && self.trace_enabled) {
         log_line(&format!(
             "A:{:02X} F:{:02X} B:{:02X} C:{:02X} D:{:02X} E:{:02X} H:{:02X} L:{:02X} SP:{:04X} PC:{:04X} PCMEM:{:02X},{:02X},{:02X},{:02X}",
             self.a, self.f, self.b, self.c, self.d, self.e, self.h, self.l, self.get_sp(), self.pc,
