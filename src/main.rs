@@ -136,6 +136,10 @@ async fn main() {
     let mut screen_bitmap_rgba : Vec<u8> = vec![0; screen_dimension];
 
 
+    let mut last_fps_check = get_time();
+    let mut frames = 0;
+    let mut fps_display = String::new();
+
 
 
     let mut rendered_yet : bool = false;
@@ -213,6 +217,20 @@ async fn main() {
                 },
             );
             handle_input(&mut mmu);
+
+            frames += 1;
+
+            let now = get_time();
+            let elapsed = now - last_fps_check;
+
+            if elapsed >= 1.0 {
+                let fps = (frames as f64 / elapsed) as u32;
+                fps_display = format!("FPS: {}", fps);
+                frames = 0;
+                last_fps_check = now;
+            }
+
+            draw_text(&fps_display, 10.0, 20.0, 30.0, BLACK);
             next_frame().await;
         }
     }

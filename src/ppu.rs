@@ -343,8 +343,8 @@ impl PPU {
                     // this is where you can render the scanline
                     // optionally: fire STAT interrupt if enabled
                     self.render_line(mmu_ref);
-                    self.render_sprite_line(mmu_ref);
                     self.render_window_line(mmu_ref);
+                    self.render_sprite_line(mmu_ref);
 
                     //mmu_ref.toggle_vram_ban(false);
                     //mmu_ref.toggle_oam_ban(false);

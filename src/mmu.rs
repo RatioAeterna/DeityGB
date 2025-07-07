@@ -43,6 +43,8 @@ pub struct MMU {
         pub oam_banned : bool,
 
         pub joypad_state : u8,
+
+
 }
 
 fn echo_ram_sub(addr: usize) -> usize {
@@ -70,6 +72,19 @@ impl MMU {
         }
     }
 
+    pub fn is_cgb_register(&self, addr : usize) -> bool {
+        matches!(
+            addr,
+            0xFF4C | 0xFF4F
+            | 0xFF51..=0xFF56
+            | 0xFF68..=0xFF6C
+            | 0xFF6C
+            | 0xFF70
+            | 0xFF76
+            | 0xFF77
+        )
+
+    }
 
     pub fn set_joypad_state(&mut self, data : u8) {
         self.joypad_state = data;
@@ -78,13 +93,18 @@ impl MMU {
     pub fn set_byte(&mut self, mut addr: usize, data : u8) {
         if echo_ram(addr) { addr = echo_ram_sub(addr); }
 
+        if addr == 0xFF05 {
+            println!("WRITING TO TIMA: {}", data);
+        }
+
         if addr < 0x8000 {
             println!("ROM WRITE");
             return;
         }
 
-        if addr == 0xFF4D {
+        if self.is_cgb_register(addr) {
             println!("FORBIDDEN. VAL {}", data);
+            return;
         }
 
         if self.vram_banned && (addr >= 0x8000) && (addr <= 0x9FFF) {
@@ -104,6 +124,8 @@ impl MMU {
     pub fn increment_div(&mut self, cycles : u8) {
         self.div_internal = self.div_internal.wrapping_add(cycles as u16); 
         //println!("DIV INTERNAL: {:#04x}, cycles: {}", self.div_internal, cycles);
+        //
+        //println!("DIV INTERNAL: {} aka {:016b}, cycles: {}", self.div_internal, self.div_internal, cycles);
     }
 
     pub fn increment_tima(&mut self) {
@@ -187,21 +209,13 @@ impl MMU {
     pub fn get_byte(&self, mut addr: usize) -> u8 {
         if echo_ram(addr) { addr = echo_ram_sub(addr); }
 
-        // TODO JUST FOR DEBUGGING WITH GB DOCTOR
-
-        if addr == 0xFF4D {
+        if self.is_cgb_register(addr) {
             return 0xFF;
         }
 
         if addr == 0xFF00 {
             return self.joypad_state;
         }
-
-        /*
-        if addr == 0xFF44 {
-            return 0x90;
-        }
-        */
 
         if self.vram_banned && (addr >= 0x8000) && (addr <= 0x9FFF) {
             return 0xFF;

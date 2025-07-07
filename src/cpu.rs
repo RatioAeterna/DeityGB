@@ -639,22 +639,11 @@ impl CPU  {
         (high_byte as u16) << 8 | (low_byte as u16)
     }
 
-    pub fn update_timers(&mut self, m_cycles : u8, mmu_ref : &mut mmu::MMU) {
-        //let t_cycles : u8 = m_cycles * 4;
-
-        let old_div : u16 = mmu_ref.fetch_div();
-        mmu_ref.increment_div(m_cycles);
-        let new_div : u16 = mmu_ref.fetch_div();
-
+    pub fn update_timers(&mut self, t_cycles : u8, mmu_ref : &mut mmu::MMU) {
         let tac_reg = mmu_ref.get_byte(0xFF07 as usize);
         let enabled_bit = tac_reg & 0b100;
-        if !(enabled_bit > 0) {
-            // we don't increment TIMA in this case
-            return;
-        }
         let clock_select = tac_reg & 0b11;
         let mut watched_bit : u8 = 0;
-        // TODO go back and understand how this bit mapping works. Why 9,3,5,7 etc.
         match clock_select {
             0 => watched_bit = 9,
             1 => watched_bit = 3,
@@ -663,13 +652,22 @@ impl CPU  {
             _ => (),
         }
 
-        let old_bit = (old_div >> watched_bit) & 1;
-        let new_bit = (new_div >> watched_bit) & 1;
+        // TODO too many function calls but whatever for now
+        for i in 0..t_cycles {
+            let old_div : u16 = mmu_ref.fetch_div();
+            mmu_ref.increment_div(1);
+            let new_div : u16 = mmu_ref.fetch_div();
 
-        // increment TIMA only on falling edges
-        if old_bit == 1 && new_bit == 0 {
-            mmu_ref.increment_tima();
+            let old_bit = (old_div >> watched_bit) & 1;
+            let new_bit = (new_div >> watched_bit) & 1;
+
+            // increment TIMA only on falling edges
+            if old_bit == 1 && new_bit == 0 && (enabled_bit > 0) {
+                mmu_ref.increment_tima();
+            }
         }
+
+
         
         //println!("DIV {:#04x} CLOCK SELECT {} OLD BIT {} NEW BIT {}", new_div, clock_select, old_bit, new_bit);
         
@@ -699,7 +697,7 @@ impl CPU  {
             let n = self.fetch(self.pc+1, mmu_ref);
 
             let disasm = self.dis.lookup(next_opcode, cb_prefix, n, nn);
-            //println!("[{:#04X}] {}", self.pc, disasm.unwrap_or("???".to_string()));
+            println!("[{:#04X}] {}", self.pc, disasm.unwrap_or("???".to_string()));
         }
 
         let mut cycles : u8 = 0;
@@ -763,17 +761,18 @@ impl CPU  {
             /*
             println!("IME: {}", self.ime);
             println!("IE: {:08b}", mmu_ref.get_byte(0xFFFF as usize));
-            println!("IF: {:08b}", mmu_ref.get_byte(0xFF0F as usize));
-            println!("TIMA: {:08b}", mmu_ref.get_byte(0xFF05 as usize));
-            println!("TAC: {:08b}", mmu_ref.get_byte(0xFF07 as usize));
             */
+            println!("IF: {:08b}", mmu_ref.get_byte(0xFF0F as usize));
+            //println!("TIMA: {:08b}", mmu_ref.get_byte(0xFF05 as usize));
+            println!("TIMA: {}", mmu_ref.get_byte(0xFF05 as usize));
+            println!("TAC: {:08b}", mmu_ref.get_byte(0xFF07 as usize));
 
             if self.ime && (ie_reg != 0) && (if_reg != 0) {
                 for i in 0..5 {
                     let mask : u8 = 1u8 << i;
 
                     if (ie_reg & mask) != 0 && (if_reg & mask) != 0 {
-                        //println!("IN HERE! {}", i);
+                        println!("IN HERE! {}", i);
                         // Clear the IF bit (acknowledge the interrupt)
                         if_reg &= !mask;
                         mmu_ref.set_if(if_reg);
@@ -1138,7 +1137,12 @@ impl CPU  {
                             0x1D => self.e = dec_reg(self.e, &mut self.f),
                             0x1E => self.e = n,
                             0x1F => rra(&mut self.a, &mut self.f),
-                            0x20 => if (self.f & 0b10000000) == 0 {self.jump_relative(n);},
+                            0x20 => {
+                                if (self.f & 0b10000000) == 0 {
+                                    self.jump_relative(n);
+                                    cycles = 12;
+                                }
+                            },
                             0x21 => ld_word(&mut self.h, &mut self.l, nn),
                             0x22 => { 
                                 let hl_val = self.get_hl(); 
@@ -1150,7 +1154,12 @@ impl CPU  {
                             0x25 => self.h = dec_reg(self.h, &mut self.f),
                             0x26 => self.h = n,
                             0x27 => daa(&mut self.a, &mut self.f),
-                            0x28 => if (self.f & 0b10000000) != 0 {self.jump_relative(n);}, // JMP if zero,
+                            0x28 => {
+                                if (self.f & 0b10000000) != 0 {
+                                    self.jump_relative(n);
+                                    cycles = 12;
+                                }
+                            }
                             0x29 => {
                                 let hl = self.get_hl();
                                 let new_hl = add_double_regs(hl, hl, &mut self.f);
@@ -1171,7 +1180,12 @@ impl CPU  {
                             0x2D => self.l = dec_reg(self.l, &mut self.f),
                             0x2E => self.l = n,
                             0x2F => complement_reg(&mut self.a, &mut self.f),
-                            0x30 => if !get_flag(&mut self.f, CARRY) {self.jump_relative(n);},
+                            0x30 => {
+                                if !get_flag(&mut self.f, CARRY) {
+                                    self.jump_relative(n);
+                                    cycles = 12;
+                                }
+                            },
                             0x31 => ld_word(&mut self.s, &mut self.p, nn),
                             0x32 => { 
                                 let hl_val = self.get_hl(); 
@@ -1193,7 +1207,12 @@ impl CPU  {
                                 mmu_ref.set_byte(self.get_hl() as usize, n);
                             },
                             0x37 => scf(&mut self.f),
-                            0x38 => if get_flag(&mut self.f, CARRY) {self.jump_relative(n);},
+                            0x38 => {
+                                if get_flag(&mut self.f, CARRY) {
+                                    self.jump_relative(n);
+                                    cycles = 12;
+                                }
+                            }
                             0x39 => {
                                 let hl = self.get_hl();
                                 let sp = self.get_sp();
@@ -1359,7 +1378,7 @@ impl CPU  {
                                 if !get_flag(&mut self.f, ZERO) {
                                     self.pc = self.stack_pop(mmu_ref);
                                     skip_increment = true;
-                                    // TODO update cycles properly
+                                    cycles = 20;
                                 }
                             },
                             0xC1 => {let bc_val = self.stack_pop(mmu_ref); self.set_bc(bc_val);},
@@ -1367,6 +1386,7 @@ impl CPU  {
                                 if !get_flag(&mut self.f, ZERO) {
                                     self.pc = nn;     
                                     skip_increment = true;
+                                    cycles = 16;
                                 }
                             },
                             0xC3 => self.pc = nn - (instruction_size as u16),
@@ -1376,6 +1396,7 @@ impl CPU  {
                                     self.stack_push(mmu_ref, self.pc);
                                     self.pc = nn;
                                     skip_increment = true;
+                                    cycles = 24;
                                 }
                             },
                             0xC5 => self.stack_push(mmu_ref, self.get_bc()),
@@ -1389,6 +1410,7 @@ impl CPU  {
                                 if(get_flag(&mut self.f, ZERO)) {
                                     self.pc = self.stack_pop(mmu_ref);
                                     skip_increment = true;
+                                    cycles = 20;
                                 }
                             },
                             0xC9 => { 
@@ -1401,6 +1423,7 @@ impl CPU  {
                                 if get_flag(&mut self.f, ZERO) {
                                     self.pc = nn;     
                                     skip_increment = true;
+                                    cycles = 16;
                                 }
                             },
                             0xCB => (), // this is just the CB prefix
@@ -1410,6 +1433,7 @@ impl CPU  {
                                     self.stack_push(mmu_ref, self.pc);
                                     self.pc = nn;
                                     skip_increment = true;
+                                    cycles = 24;
                                 }
                             },
                             0xCD => {
@@ -1428,21 +1452,15 @@ impl CPU  {
                                 if !get_flag(&mut self.f, CARRY) {
                                     self.pc = self.stack_pop(mmu_ref);
                                     skip_increment = true;
-                                    // TODO update cycles
-                                    //self.cycles += 20; // RET taken
+                                    cycles = 20;
                                 }
-                                // TODO otherwise we just take 8, the default
-                                /*
-                                else {
-                                    self.cycles += 8;  // RET not taken
-                                }
-                                */
                             },
                             0xD1 => {let de_val = self.stack_pop(mmu_ref); self.set_de(de_val);},
                             0xD2 => {
                                 if !get_flag(&mut self.f, CARRY) {
                                     self.pc = nn;     
                                     skip_increment = true;
+                                    cycles = 16;
                                 }
                             }
                             0xD3 => (),
@@ -1452,6 +1470,7 @@ impl CPU  {
                                     self.stack_push(mmu_ref, self.pc);
                                     self.pc = nn;
                                     skip_increment = true;
+                                    cycles = 24;
                                 }
                             },
                             0xD5 => self.stack_push(mmu_ref, self.get_de()),
@@ -1465,6 +1484,7 @@ impl CPU  {
                                 if(get_flag(&mut self.f, CARRY)) {
                                     self.pc = self.stack_pop(mmu_ref);
                                     skip_increment = true;
+                                    cycles = 20;
                                 }
                             },
                             0xD9 => {
@@ -1477,6 +1497,7 @@ impl CPU  {
                                 if get_flag(&mut self.f, CARRY) {
                                     self.pc = nn;     
                                     skip_increment = true;
+                                    cycles = 16;
                                 }
                             },
                             0xDB => (),
@@ -1486,6 +1507,7 @@ impl CPU  {
                                     self.stack_push(mmu_ref, self.pc);
                                     self.pc = nn;
                                     skip_increment = true;
+                                    cycles = 24;
                                 }
                             },
                             0xDD => (),
