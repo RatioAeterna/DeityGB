@@ -1,4 +1,13 @@
 
+
+#[derive(Clone)]
+struct MBC1 {
+    ram_enabled: bool,
+    rom_bank: u8,
+    // Ignore ram_bank and banking_mode for now
+}
+
+
 #[derive(Clone)]
 pub struct MMU {
 
@@ -44,6 +53,11 @@ pub struct MMU {
 
         pub joypad_state : u8,
 
+        pub cartridge_type_code : u8,
+        pub rom_banks : usize,
+        pub ram_banks : usize,
+
+        pub mbc1 : MBC1,
 
 }
 
@@ -69,6 +83,10 @@ impl MMU {
             vram_banned : false,
             oam_banned : false,
             joypad_state : 0xCF,
+            cartridge_type_code : 0x00,
+            mbc1 : MBC1 { ram_enabled : false, rom_bank : 0 },
+            rom_banks : 0,
+            ram_banks : 0,
         }
     }
 
@@ -92,6 +110,17 @@ impl MMU {
 
     pub fn set_byte(&mut self, mut addr: usize, data : u8) {
         if echo_ram(addr) { addr = echo_ram_sub(addr); }
+
+        if (self.rom_banks > 2) && (addr >= 0x00) && (addr <= 0x1FFF) {
+            self.mbc1.ram_enabled = (data & 0x0F) == 0x0A;
+        }
+        if (self.rom_banks > 2) && (addr >= 0x2000) && (addr <= 0x3FFF) {
+            self.mbc1.rom_bank = data & 0x1F;
+            if self.mbc1.rom_bank == 0 {
+                self.mbc1.rom_bank = 1;
+            }
+        }
+
 
         if addr == 0xFF05 {
             println!("WRITING TO TIMA: {}", data);
@@ -148,20 +177,18 @@ impl MMU {
         return self.div_internal;
     }
 
-    /*
-    fn handle_bank_switch(&mut self, address: usize, value: u8) {
-        if (0x2000..=0x3FFF).contains(&address) {
-            match value {
-                0 => load_into_switchable_bank(32768..49152),  // 33-48 KB
-                1 => load_into_switchable_bank(49152..65536),  // 49-64 KB
-                _ => {} // Ignore other values for now 
-            }
-        }
-    }
-    */
-
 
     pub fn set_word(&mut self, mut addr: usize, data: u16) {
+
+        if (addr >= 0x00) && (addr <= 0x1FFF) {
+            self.mbc1.ram_enabled = (data & 0x0F) == 0x0A;
+        }
+        if (addr >= 0x2000) && (addr <= 0x3FFF) {
+            self.mbc1.rom_bank = (data & 0x001F) as u8;
+            if self.mbc1.rom_bank == 0 {
+                self.mbc1.rom_bank = 1;            }
+        }
+
 
         if addr == 0xFF4D {
             println!("FORBIDDEN. VAL {}", data);
@@ -213,6 +240,12 @@ impl MMU {
             println!("TRYING TO READ : {:#04x}", addr);
             return 0xFF;
         }
+
+        if (self.rom_banks > 2) && (addr >= 0x4000) && (addr <= 0x7FFF) {
+            let bank_offset = self.mbc1.rom_bank as usize * 0x4000;
+            return self.rom_data[bank_offset + (addr - 0x4000) as usize]
+        }
+
 
         if addr == 0xFF00 {
             return self.joypad_state;
@@ -282,6 +315,34 @@ impl MMU {
 
     pub fn load_rom(&mut self, rom_data : &Vec<u8>) {
         self.rom_data = rom_data.to_vec();
+
+        self.cartridge_type_code = rom_data[0x0147];
+        let rom_size_code = rom_data[0x0148];
+        let ram_size_code = rom_data[0x0148];
+
+        self.rom_banks = match rom_size_code {
+            0x00 => 2,    
+            0x01 => 4,
+            0x02 => 8,
+            0x03 => 16,
+            0x04 => 32,
+            0x05 => 64,
+            0x06 => 128,
+            0x07 => 256,
+            0x08 => 512,
+            _ => 0,
+        };
+
+        self.ram_banks = match rom_size_code {
+            0x00 => 0,    
+            0x02 => 1,
+            0x03 => 4,
+            0x04 => 16,
+            0x05 => 8,
+            _ => 0,
+        };
+
+
         // First, load fixed bank
         for i in 0x0000..0x4000 {
             // should probably only happen with boot ROM
