@@ -248,7 +248,9 @@ impl PPU {
         // TODO when PPU is turned off (??) we need to call this function to set
         // mode zero
         assert!(mode >= 0 && mode < 4);
-        let old_stat = mmu_ref.get_byte(0xFF41 as usize);
+        let mut old_stat = mmu_ref.get_byte(0xFF41 as usize);
+        // clear old mode out
+        old_stat &= 0b00;
         mmu_ref.set_byte(0xFF41, old_stat | mode);
 
         // trigger STAT interrupt if appropriate
@@ -305,7 +307,7 @@ impl PPU {
         self.accumulated_cycles = self.accumulated_cycles.wrapping_add(t_cycles as u16);
 
         let ly = self.get_ly(mmu_ref);
-        println!("ACCUMULATED CYCLES: {}, ly: {}, mode: {:?}", self.accumulated_cycles, ly, self.mode);
+        //println!("ACCUMULATED CYCLES: {}, ly: {}, mode: {:?}", self.accumulated_cycles, ly, self.mode);
         self.check_ly_eq_lyc(mmu_ref);
         
         // figure out which MODE we are in
@@ -340,7 +342,7 @@ impl PPU {
             Transfer => {
                 if self.accumulated_cycles >= 80 + 172 {
                     self.mode = HBlank;
-                    //self.toggle_stat_mode(0, mmu_ref);
+                    self.toggle_stat_mode(0, mmu_ref);
 
                     // this is where you can render the scanline
                     // optionally: fire STAT interrupt if enabled

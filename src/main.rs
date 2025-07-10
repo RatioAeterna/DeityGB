@@ -35,42 +35,53 @@ fn handle_input(mmu: &mut mmu::MMU) {
 
 
     if select_dpad {
+        println!("HELLO");
         if is_key_down(KeyCode::W) {
             joypad_state &= !0b00000100; // Up
             println!("UP");
+            mmu.last_input_dpad = true;
         }
         if is_key_down(KeyCode::A) {
             joypad_state &= !0b00000010; // Left
             println!("LEFT");
+            mmu.last_input_dpad = true;
         }
         if is_key_down(KeyCode::S) {
             joypad_state &= !0b00001000; // Down
             println!("DOWN");
+            mmu.last_input_dpad = true;
         }
         if is_key_down(KeyCode::D) {
             joypad_state &= !0b00000001; // Right
             println!("RIGHT");
+            mmu.last_input_dpad = true;
         }
     }
     if select_buttons {
         if is_key_down(KeyCode::J) {
             joypad_state &= !0b00000001; // A
             println!("A");
+            mmu.last_input_dpad = false;
         }
         if is_key_down(KeyCode::K) {
             joypad_state &= !0b00000010; // B
             println!("B");
+            mmu.last_input_dpad = false;
         }
         if is_key_down(KeyCode::LeftShift) {
             joypad_state &= !0b00000100; // Select
             println!("SELECT");
+            mmu.last_input_dpad = false;
         }
         if is_key_down(KeyCode::Enter) {
             joypad_state &= !0b00001000; // Start
             println!("START");
+            mmu.last_input_dpad = false;
         }
     }
 
+
+    //println!("0b{:08b}", joypad_state);
     mmu.set_joypad_state(joypad_state);
 }
 
@@ -156,8 +167,10 @@ async fn main() {
         // After accumulating 456 cycles, we render a single line with the PPU.
         // Once 144 lines are rendered, we enter VBlank, where we can safely copy the screen buffer to display it.
         let cycles = cpu.cycle(&mut mmu);
-        println!("CYCLES: {}, rendered_yet: {}", cycles, rendered_yet);
+        //println!("CYCLES: {}, rendered_yet: {}", cycles, rendered_yet);
         ppu.cycle(cycles, &mut mmu);
+
+        handle_input(&mut mmu);
 
         if ppu.reached_vblank() && !rendered_yet {
             gb_screen = *ppu.get_buffer();
@@ -216,7 +229,7 @@ async fn main() {
                     ..Default::default()
                 },
             );
-            handle_input(&mut mmu);
+            //handle_input(&mut mmu);
 
             frames += 1;
 

@@ -59,6 +59,7 @@ pub struct MMU {
 
         pub mbc1 : MBC1,
 
+        pub last_input_dpad : bool,
 }
 
 fn echo_ram_sub(addr: usize) -> usize {
@@ -87,6 +88,8 @@ impl MMU {
             mbc1 : MBC1 { ram_enabled : false, rom_bank : 0 },
             rom_banks : 0,
             ram_banks : 0,
+
+            last_input_dpad : false,
         }
     }
 
@@ -110,6 +113,22 @@ impl MMU {
 
     pub fn set_byte(&mut self, mut addr: usize, data : u8) {
         if echo_ram(addr) { addr = echo_ram_sub(addr); }
+
+        // OAM DMA
+        // TODO this should take 160 M cycles.
+        if (addr == 0xFF46) {
+            let source = (data as u16) << 8;
+            for i in 0..160 {
+                let obj_byte : u8 = self.get_byte((source + i) as usize);
+                self.set_oam(i as u8, obj_byte) 
+            }            
+        }
+
+        if addr == 0xFF00 {
+            self.joypad_state = (data & 0xF0) | (self.joypad_state & 0x0F);
+            println!("WRITING: 0b{:08b}", self.joypad_state);
+        }
+
 
         if (self.rom_banks > 2) && (addr >= 0x00) && (addr <= 0x1FFF) {
             self.mbc1.ram_enabled = (data & 0x0F) == 0x0A;
@@ -180,6 +199,16 @@ impl MMU {
 
     pub fn set_word(&mut self, mut addr: usize, data: u16) {
 
+        // OAM DMA
+        // TODO we probably just want to delete this whole function
+        if (addr == 0xFF46) {
+            let source = (data) << 8;
+            for i in 0..160 {
+                let obj_byte : u8 = self.get_byte((source + i) as usize);
+                self.set_oam(i as u8, obj_byte) 
+            }            
+        }
+
         if (addr >= 0x00) && (addr <= 0x1FFF) {
             self.mbc1.ram_enabled = (data & 0x0F) == 0x0A;
         }
@@ -224,6 +253,11 @@ impl MMU {
         return self.memory[addr];
     }
 
+    pub fn set_oam(&mut self, index : u8, data : u8) {
+        let addr : usize = (0xFE00 + index as u16).into(); 
+        self.memory[addr] = data;
+    }
+
 
     pub fn toggle_vram_ban(&mut self, val : bool) {
         self.vram_banned = val;
@@ -248,7 +282,24 @@ impl MMU {
 
 
         if addr == 0xFF00 {
+            /*
+            if self.last_input_dpad {
+                println!("DPAD");
+                println!("0b{:08b}", self.joypad_state | 0b00100000);
+                return self.joypad_state | 0b00100000;
+            }
+            else {
+                println!("BUTTON");
+                println!("0b{:08b}", self.joypad_state | 0b00010000);
+                return self.joypad_state | 0b00010000;
+            }
+            */
             return self.joypad_state;
+        }
+        
+        if addr == 0xFF01 {
+            return 0xFF;
+            // serial comms
         }
 
         if self.vram_banned && (addr >= 0x8000) && (addr <= 0x9FFF) {

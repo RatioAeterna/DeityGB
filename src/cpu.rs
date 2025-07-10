@@ -692,12 +692,12 @@ impl CPU  {
         next_opcode = self.fetch(self.pc, mmu_ref);
 
         // disassemble and print the instruction we're looking at, for debugging purposes
-        if self.trace_enabled {
+        if true {
             let nn = self.next_word(self.pc+1, mmu_ref);
             let n = self.fetch(self.pc+1, mmu_ref);
 
             let disasm = self.dis.lookup(next_opcode, cb_prefix, n, nn);
-            println!("[{:#04X}] {}", self.pc, disasm.unwrap_or("???".to_string()));
+            //println!("[{:#04X}] {}", self.pc, disasm.unwrap_or("???".to_string()));
         }
 
         let mut cycles : u8 = 0;
