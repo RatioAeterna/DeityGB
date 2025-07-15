@@ -4,6 +4,7 @@ use std::io::prelude::*;
 use std::path::Path;
 
 use macroquad::prelude::*;
+use std::time::{Duration, Instant};
 
 mod cpu;
 mod mmu;
@@ -21,6 +22,7 @@ const GB_SCREEN_DIM : u32 = 23040; // 160x144
 const SCREEN_UPSCALE_FACTOR : f32 = 5.0; // gameboy screen is super tiny, so we upscale it
 
 
+
 fn handle_input(mmu: &mut mmu::MMU) {
     // Joypad register address
     let joypad_reg = 0xFF00;
@@ -35,47 +37,38 @@ fn handle_input(mmu: &mut mmu::MMU) {
 
 
     if select_dpad {
-        println!("HELLO");
         if is_key_down(KeyCode::W) {
             joypad_state &= !0b00000100; // Up
-            println!("UP");
             mmu.last_input_dpad = true;
         }
         if is_key_down(KeyCode::A) {
             joypad_state &= !0b00000010; // Left
-            println!("LEFT");
             mmu.last_input_dpad = true;
         }
         if is_key_down(KeyCode::S) {
             joypad_state &= !0b00001000; // Down
-            println!("DOWN");
             mmu.last_input_dpad = true;
         }
         if is_key_down(KeyCode::D) {
             joypad_state &= !0b00000001; // Right
-            println!("RIGHT");
             mmu.last_input_dpad = true;
         }
     }
     if select_buttons {
         if is_key_down(KeyCode::J) {
             joypad_state &= !0b00000001; // A
-            println!("A");
             mmu.last_input_dpad = false;
         }
         if is_key_down(KeyCode::K) {
             joypad_state &= !0b00000010; // B
-            println!("B");
             mmu.last_input_dpad = false;
         }
         if is_key_down(KeyCode::LeftShift) {
             joypad_state &= !0b00000100; // Select
-            println!("SELECT");
             mmu.last_input_dpad = false;
         }
         if is_key_down(KeyCode::Enter) {
             joypad_state &= !0b00001000; // Start
-            println!("START");
             mmu.last_input_dpad = false;
         }
     }
@@ -150,6 +143,11 @@ async fn main() {
     let mut last_fps_check = get_time();
     let mut frames = 0;
     let mut fps_display = String::new();
+
+    //let target_fps = 59.7275;
+    let target_fps = 62.7275;
+    let frame_duration = Duration::from_secs_f64(1.0 / target_fps);
+    let mut last_frame_time = Instant::now();
 
 
     let mut rendered_yet : bool = false;
@@ -242,6 +240,12 @@ async fn main() {
                 frames = 0;
                 last_fps_check = now;
             }
+
+            let current_frame_elapsed = last_frame_time.elapsed();
+            if current_frame_elapsed < frame_duration {
+                std::thread::sleep(frame_duration - current_frame_elapsed);
+            }
+            last_frame_time = Instant::now();
 
             draw_text(&fps_display, 10.0, 20.0, 30.0, BLACK);
             next_frame().await;

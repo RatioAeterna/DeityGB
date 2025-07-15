@@ -217,14 +217,22 @@ impl PPU {
         if sprite {
             let actual_pixel = shifted_pixel_data & !mask;
             if actual_pixel == 0 {
+                //println!("SKIP! LY: {}, LX: {}", ly, lx);
                 return;
             }
         }
+
 
         // NOTE: The reason we keep using '40' for stuff here is that there are 4 pixels per byte,
         // and 160 pixels per "row" of the GB screen, so we have 160/4 = 40 bytes per "row"
         //println!("STUFF!! {}, {}, {}", (x_idx as usize + 40 * ly as usize), x_idx, ly);
         let original = self.screen[(x_idx as usize + 40*ly as usize) as usize];
+        /*
+        if (lx == 81) && (ly == 79) {
+            println!("SHOULD BE SKIPPED.. COLORED PIXEL {:#010b}. Sprite: {}", shifted_pixel_data, sprite);
+            println!("MASK & ORIGINAL {:#010b}, should become: {:#010b}, currently: {:#010b}", mask & original, (mask & original) | shifted_pixel_data, self.screen[(x_idx as usize + 40*ly as usize) as usize]);
+        }
+        */
         self.screen[(x_idx as usize + 40*ly as usize) as usize] = (mask & original) | shifted_pixel_data;
     }
 
@@ -250,7 +258,7 @@ impl PPU {
         assert!(mode >= 0 && mode < 4);
         let mut old_stat = mmu_ref.get_byte(0xFF41 as usize);
         // clear old mode out
-        old_stat &= 0b00;
+        old_stat &= 0b11111100;
         mmu_ref.set_byte(0xFF41, old_stat | mode);
 
         // trigger STAT interrupt if appropriate
@@ -513,6 +521,11 @@ impl PPU {
                 for fake_lx in sprite_x..(sprite_x+8) {
                     let tile_x = if sprite.x_flip { 7 - fake_lx } else { fake_lx };
                     let tile_y = if sprite.y_flip { 7 - ly } else { ly };
+                    // DEBUG
+                    /*
+                    let tile_x = if false { 7 - fake_lx } else { fake_lx };
+                    let tile_y = if false { 7 - ly } else { ly };
+                    */
 
                     let pixel_data : u8 = self.tiledata_fetch_pixel(tile_x as usize, tile_y as usize, tile_id as usize, mmu_ref);
                     let colored_pixel_data : u8 = self.apply_palette_to_four_pixels(pixel_data, palette);

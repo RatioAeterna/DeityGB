@@ -1092,7 +1092,11 @@ impl CPU  {
                             0x05 => self.b = dec_reg(self.b, &mut self.f),
                             0x06 => self.b = n,
                             0x07 => rlca(&mut self.a, &mut self.f),
-                            0x08 => mmu_ref.set_word(nn as usize, self.get_sp()),
+                            0x08 => { 
+                                let sp : u16 = self.get_sp();
+                                mmu_ref.set_byte(nn as usize, (sp & 0xFF) as u8);
+                                mmu_ref.set_byte((nn+1) as usize, ((sp & 0xFF00) >> 8) as u8);
+                            },
                             0x09 => {
                                 let hl = self.get_hl();
                                 let bc = self.get_bc();

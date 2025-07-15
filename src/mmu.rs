@@ -3,8 +3,10 @@
 #[derive(Clone)]
 struct MBC1 {
     ram_enabled: bool,
-    rom_bank: u8,
-    // Ignore ram_bank and banking_mode for now
+    rom_bank: u8, // lower bits of ROM bank
+    ram_bank: u8,
+    //upper_bits: u8, // either upper bits of ROM bank (mode 0) or RAM bank (mode 1)
+    banking_mode : u8,
 }
 
 
@@ -60,6 +62,9 @@ pub struct MMU {
         pub mbc1 : MBC1,
 
         pub last_input_dpad : bool,
+
+        pub ram_size : usize, // size of external ram
+        pub external_ram : Vec<u8>,
 }
 
 fn echo_ram_sub(addr: usize) -> usize {
@@ -85,11 +90,13 @@ impl MMU {
             oam_banned : false,
             joypad_state : 0xCF,
             cartridge_type_code : 0x00,
-            mbc1 : MBC1 { ram_enabled : false, rom_bank : 0 },
+            mbc1 : MBC1 { ram_enabled : false, rom_bank : 1, ram_bank : 0, banking_mode : 0 },
             rom_banks : 0,
             ram_banks : 0,
 
             last_input_dpad : false,
+            ram_size : 0,
+            external_ram : vec![],
         }
     }
 
@@ -111,8 +118,133 @@ impl MMU {
         self.joypad_state = data;
     }
 
+
+    fn get_rom_bank_mask(&self) -> u8 {
+        match self.rom_banks {
+            2 => 0x01,
+            4 => 0x03,
+            8 => 0x07,
+            16 => 0x0F,
+            _ => 0x1F,
+        }
+    }
+    
+    fn compute_zero_bank_number(&self) -> u8 {
+        if self.rom_banks <= 32 {
+            return 0;
+        }
+        if self.rom_banks == 64 {
+            return (self.mbc1.ram_bank & 0b1) << 5;
+            // TODO multi cart roms are an exception.. do we care?
+        }
+        if self.rom_banks == 128 {
+            return (self.mbc1.ram_bank) << 5;
+            // should be 0x00, 0x20, 0x40, or 0x60
+        }
+        else {
+            // TODO handle
+            return 0;
+        }
+    }
+
+    fn compute_high_bank_number(&self) -> u8 {
+        if self.rom_banks <= 32 {
+            return self.mbc1.rom_bank & self.get_rom_bank_mask();
+        }
+        if self.rom_banks == 64 {
+            let base = self.mbc1.rom_bank & self.get_rom_bank_mask();
+            let bit = self.mbc1.ram_bank & 0b1;
+            if bit == 0 {
+                return base & 0b11011111;
+            }
+            else {
+                return base | 0b00100000;
+            }
+        }
+        if self.rom_banks == 128 {
+            let mut base = self.mbc1.rom_bank & self.get_rom_bank_mask();
+            let ram_bank = self.mbc1.ram_bank << 5;
+            base &= 0b10011111;
+            base |= ram_bank;
+            return base;
+        }
+        else {
+            return 0;
+        }
+    }
+
+    fn read_external_ram(&self, mut addr: usize) -> u8 {
+        //println!("READING FROM RAM");
+        if !self.mbc1.ram_enabled {
+            return 0xFF;
+        }
+        if self.ram_size == 0 {
+            return 0xFF;
+        }
+        if (self.ram_size == 2048) || (self.ram_size == 8192) {
+            addr = (addr - 0xA000) % self.ram_size;
+            return self.external_ram[addr];
+        }
+        if (self.ram_size == (4 * 8192)) {
+            if self.mbc1.banking_mode == 0 {
+                addr = (addr - 0xA000);
+                return self.external_ram[addr];
+            }
+            else {
+                addr = 0x2000 * (self.mbc1.ram_bank as usize) + (addr - 0xA000);
+                //println!("READING FROM RAM IN MODE 1");
+                return self.external_ram[addr];
+            }
+        }
+        else {
+            // TODO implement this case!!
+            return 0xFF;
+        }
+    }
+
+    fn write_external_ram(&mut self, mut addr: usize, data : u8) {
+        //println!("WRITING TO RAM");
+        if !self.mbc1.ram_enabled {
+            return;
+        }
+        if self.ram_size == 0 {
+            return;
+        }
+        if (self.ram_size == 2048) || (self.ram_size == 8192) {
+            addr = (addr - 0xA000) % self.ram_size;
+            self.external_ram[addr] = data;
+            return;
+        }
+        if (self.ram_size == (4 * 8192)) {
+            if self.mbc1.banking_mode == 0 {
+                addr = (addr - 0xA000);
+                self.external_ram[addr] = data;
+                return;
+            }
+            else {
+                addr = 0x2000 * (self.mbc1.ram_bank as usize) + (addr - 0xA000);
+                self.external_ram[addr] = data;
+                //println!("WRITING TO RAM IN MODE 1");
+                return;
+            }
+        }
+        else {
+            // TODO implement this case!!
+        }
+    }
+
     pub fn set_byte(&mut self, mut addr: usize, data : u8) {
         if echo_ram(addr) { addr = echo_ram_sub(addr); }
+
+        /*
+        if addr == 0xFF45 {
+            println!("SETTING LYC! {}", data);
+        }
+        */
+
+        if addr == 0xFF01 {
+            println!("SERIAL: {}", data);
+        }
 
         // OAM DMA
         // TODO this should take 160 M cycles.
@@ -126,18 +258,38 @@ impl MMU {
 
         if addr == 0xFF00 {
             self.joypad_state = (data & 0xF0) | (self.joypad_state & 0x0F);
-            println!("WRITING: 0b{:08b}", self.joypad_state);
+            //println!("WRITING: 0b{:08b}", self.joypad_state);
         }
 
 
-        if (self.rom_banks > 2) && (addr >= 0x00) && (addr <= 0x1FFF) {
+        if (self.cartridge_type_code != 0) && (addr >= 0x00) && (addr <= 0x1FFF) {
             self.mbc1.ram_enabled = (data & 0x0F) == 0x0A;
         }
-        if (self.rom_banks > 2) && (addr >= 0x2000) && (addr <= 0x3FFF) {
-            self.mbc1.rom_bank = data & 0x1F;
-            if self.mbc1.rom_bank == 0 {
+        if (self.cartridge_type_code != 0) && (addr >= 0x2000) && (addr <= 0x3FFF) {
+            println!("FETCHING BANK: {}", (data as usize) % self.rom_banks);
+            // restrict to only 5 bit register
+            let actual_data = data & 0b00011111;
+
+            if actual_data == 0 {
                 self.mbc1.rom_bank = 1;
             }
+            else {
+                self.mbc1.rom_bank = actual_data & self.get_rom_bank_mask();
+                //self.mbc1.rom_bank = if masked == 0 { 1 } else { masked };
+            }
+            println!("SETTING ROM BANK TO: {}", self.mbc1.rom_bank);
+        }
+        if (self.cartridge_type_code != 0) && (addr >= 0x4000) && (addr <= 0x5FFF) {
+            self.mbc1.ram_bank = data & 0b00000011;
+        }
+
+        if (self.cartridge_type_code != 0) && (addr >= 0x6000) && (addr <= 0x7FFF) {
+            self.mbc1.banking_mode = data & 0b1;
+            println!("BANKING MODE SET: {}", self.mbc1.banking_mode);
+        }
+
+        if (self.cartridge_type_code != 0) && (addr >= 0xA000) && (addr <= 0xBFFF) {
+            self.write_external_ram(addr, data);
         }
 
 
@@ -145,8 +297,9 @@ impl MMU {
             println!("WRITING TO TIMA: {}", data);
         }
 
+        // catch-all for writes to ROM (both valid and invalid)
         if addr < 0x8000 {
-            println!("ROM WRITE");
+            //println!("ROM WRITE");
             return;
         }
 
@@ -196,52 +349,6 @@ impl MMU {
         return self.div_internal;
     }
 
-
-    pub fn set_word(&mut self, mut addr: usize, data: u16) {
-
-        // OAM DMA
-        // TODO we probably just want to delete this whole function
-        if (addr == 0xFF46) {
-            let source = (data) << 8;
-            for i in 0..160 {
-                let obj_byte : u8 = self.get_byte((source + i) as usize);
-                self.set_oam(i as u8, obj_byte) 
-            }            
-        }
-
-        if (addr >= 0x00) && (addr <= 0x1FFF) {
-            self.mbc1.ram_enabled = (data & 0x0F) == 0x0A;
-        }
-        if (addr >= 0x2000) && (addr <= 0x3FFF) {
-            self.mbc1.rom_bank = (data & 0x001F) as u8;
-            if self.mbc1.rom_bank == 0 {
-                self.mbc1.rom_bank = 1;            }
-        }
-
-
-        if addr == 0xFF4D {
-            println!("FORBIDDEN. VAL {}", data);
-        }
-
-        if addr < 0x8000 {
-            println!("ROM WRITE");
-            return;
-        }
-
-        if echo_ram(addr) { addr = echo_ram_sub(addr); }
-
-        if self.vram_banned && (addr >= 0x8000) && (addr <= 0x9FFF) {
-            return;
-        }
-        if self.oam_banned && (addr >= 0xFE00) && (addr <= 0xFE9F) {
-            return;
-        }
-
-        self.memory[addr] = (data & 0x00FF) as u8;
-        self.memory[addr + 1] = (data >> 8) as u8;
-    }
-
-
     // check if we have we set the 'BOOT' reg, i.e., at the end of the boot sequence
     pub fn get_boot(&self) -> u8 {
         self.memory[0xFF50]
@@ -270,14 +377,35 @@ impl MMU {
     pub fn get_byte(&self, mut addr: usize) -> u8 {
         if echo_ram(addr) { addr = echo_ram_sub(addr); }
 
+        if addr < 0x0100 && (self.get_boot() == 0) {
+            return self.boot_rom[addr];
+        }
+
         if self.is_cgb_register(addr) {
             println!("TRYING TO READ : {:#04x}", addr);
             return 0xFF;
         }
+    
+        if (self.cartridge_type_code != 0) && (addr >= 0x0000) && (addr <= 0x3FFF) {
+            if self.mbc1.banking_mode == 0 {
+                return self.rom_data[addr];
+            }
+            else {
+                let zero_bank_number = self.compute_zero_bank_number();
+                addr = 0x4000 * (zero_bank_number as usize) + addr; 
+                return self.rom_data[addr];
+            }
+        }
 
-        if (self.rom_banks > 2) && (addr >= 0x4000) && (addr <= 0x7FFF) {
-            let bank_offset = self.mbc1.rom_bank as usize * 0x4000;
+        if (self.cartridge_type_code != 0) && (addr >= 0x4000) && (addr <= 0x7FFF) {
+            let high_bank_number = self.compute_high_bank_number();
+            //println!("HIGH BANK NUMBER {}", high_bank_number);
+            let bank_offset = high_bank_number as usize * 0x4000;
             return self.rom_data[bank_offset + (addr - 0x4000) as usize]
+        }
+
+        if (self.cartridge_type_code != 0) && (addr >= 0xA000) && (addr <= 0xBFFF) {
+            return self.read_external_ram(addr);
         }
 
 
@@ -316,9 +444,6 @@ impl MMU {
             return (self.div_internal >> 8) as u8;
         }
 
-        if addr < 0x0100 && (self.get_boot() == 0) {
-            return self.boot_rom[addr];
-        }
         else {
             return self.memory[addr];
         }
@@ -369,7 +494,15 @@ impl MMU {
 
         self.cartridge_type_code = rom_data[0x0147];
         let rom_size_code = rom_data[0x0148];
-        let ram_size_code = rom_data[0x0148];
+        let ram_size_code = rom_data[0x0149];
+
+
+        let do_we_even_use_ram = match self.cartridge_type_code {
+            0x00 => false, // cartridge only
+            0x01 => false, // base MBC1
+            0x02 => true, // MBC1 with RAM
+            _ => true,
+        };
 
         self.rom_banks = match rom_size_code {
             0x00 => 2,    
@@ -384,14 +517,32 @@ impl MMU {
             _ => 0,
         };
 
-        self.ram_banks = match rom_size_code {
-            0x00 => 0,    
-            0x02 => 1,
-            0x03 => 4,
-            0x04 => 16,
-            0x05 => 8,
-            _ => 0,
-        };
+        if do_we_even_use_ram {
+            self.ram_banks = match ram_size_code {
+                0x00 => 0,    
+                0x02 => 1,
+                0x03 => 4,
+                0x04 => 16,
+                0x05 => 8,
+                _ => 0,
+            };
+
+            self.ram_size = match ram_size_code {
+                0x00 => 2048,    
+                0x02 => 8192,
+                0x03 => 4*8192,
+                0x04 => 16*8192,
+                0x05 => 8*8192,
+                _ => 0,
+            };
+
+            self.external_ram = vec![0; self.ram_size];
+        }
+
+
+        println!("ROM BANKS: {}", self.rom_banks);
+        println!("RAM BANKS: {}", self.ram_banks);
+        println!("do we even use ram: {}", do_we_even_use_ram);
 
 
         // First, load fixed bank
