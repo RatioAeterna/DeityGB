@@ -772,7 +772,7 @@ impl CPU  {
                     let mask : u8 = 1u8 << i;
 
                     if (ie_reg & mask) != 0 && (if_reg & mask) != 0 {
-                        println!("IN HERE! {}", i);
+                        //println!("IN HERE! {}", i);
                         // Clear the IF bit (acknowledge the interrupt)
                         if_reg &= !mask;
                         mmu_ref.set_if(if_reg);

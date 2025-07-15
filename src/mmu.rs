@@ -266,7 +266,6 @@ impl MMU {
             self.mbc1.ram_enabled = (data & 0x0F) == 0x0A;
         }
         if (self.cartridge_type_code != 0) && (addr >= 0x2000) && (addr <= 0x3FFF) {
-            println!("FETCHING BANK: {}", (data as usize) % self.rom_banks);
             // restrict to only 5 bit register
             let actual_data = data & 0b00011111;
 
@@ -277,7 +276,6 @@ impl MMU {
                 self.mbc1.rom_bank = actual_data & self.get_rom_bank_mask();
                 //self.mbc1.rom_bank = if masked == 0 { 1 } else { masked };
             }
-            println!("SETTING ROM BANK TO: {}", self.mbc1.rom_bank);
         }
         if (self.cartridge_type_code != 0) && (addr >= 0x4000) && (addr <= 0x5FFF) {
             self.mbc1.ram_bank = data & 0b00000011;
@@ -285,7 +283,6 @@ impl MMU {
 
         if (self.cartridge_type_code != 0) && (addr >= 0x6000) && (addr <= 0x7FFF) {
             self.mbc1.banking_mode = data & 0b1;
-            println!("BANKING MODE SET: {}", self.mbc1.banking_mode);
         }
 
         if (self.cartridge_type_code != 0) && (addr >= 0xA000) && (addr <= 0xBFFF) {

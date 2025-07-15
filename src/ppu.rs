@@ -603,8 +603,8 @@ impl PPU {
             let pixel_data : u8;
 
             if signed_tiledata_indices {
-                let signed_tile_id : isize = tile_id as isize;
-                pixel_data = self.tiledata_fetch_pixel_signed(fake_lx as usize, ly as usize, tile_id as isize, mmu_ref);
+                let signed_tile_id : isize = (tile_id as i8) as isize;
+                pixel_data = self.tiledata_fetch_pixel_signed(fake_lx as usize, ly as usize, signed_tile_id, mmu_ref);
             }
             else {
                 pixel_data = self.tiledata_fetch_pixel(fake_lx as usize, ly as usize, tile_id as usize, mmu_ref);
@@ -666,7 +666,7 @@ impl PPU {
             let pixel_data : u8;
 
             if signed_tiledata_indices {
-                let signed_tile_id : isize = tile_id as isize;
+                let signed_tile_id : isize = (tile_id as i8) as isize;
                 pixel_data = self.tiledata_fetch_pixel_signed(bg_x as usize, bg_y as usize, signed_tile_id, mmu_ref);
             }
             else {
