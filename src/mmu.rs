@@ -43,8 +43,6 @@ pub struct MMU {
 	Bit 4: Joypad   Interrupt Enable  (INT 60h)  (1=Enable)
 	*/
 
-
-
 	pub memory : Vec<u8>, 
         pub boot_rom : Vec<u8>,
         pub rom_data : Vec<u8>,
@@ -65,6 +63,11 @@ pub struct MMU {
 
         pub ram_size : usize, // size of external ram
         pub external_ram : Vec<u8>,
+
+        pub nr11_written : bool,
+        pub nr21_written : bool,
+        pub nr31_written : bool,
+        pub nr41_written : bool,
 }
 
 fn echo_ram_sub(addr: usize) -> usize {
@@ -97,6 +100,11 @@ impl MMU {
             last_input_dpad : false,
             ram_size : 0,
             external_ram : vec![],
+
+            nr11_written : false,
+            nr21_written : false,
+            nr31_written : false,
+            nr41_written : false,
         }
     }
 
@@ -113,6 +121,108 @@ impl MMU {
         )
 
     }
+
+    pub fn apu_reg_set(&mut self, addr : usize, data : u8) {
+        // first, check if APU is enabled. Ignore write if not.
+        let enabled = (self.get_byte(0xFF26 as usize) & 0b10000000) != 0;
+        if !enabled && (addr != 0xFF26) && (addr < 0xFF30) {
+            return; // if we're not writing to wave RAM
+        }
+        
+        let set_val = match addr {
+            0xFF26 => { // NR52
+                let master_enable = data & 0x80; // only writeable bit
+                let current_status = self.memory[addr] & 0x0F; // keep channel status bits
+                println!("WRITING TO NR52: 0b{:08b}", master_enable | current_status);
+                master_enable | current_status
+            },
+            0xFF11 => {
+                self.nr11_written = true;
+                data
+            },
+            0xFF16 => {
+                self.nr21_written = true;
+                data
+            },
+            0xFF1B => {
+                self.nr31_written = true;
+                data
+            },
+            0xFF20 => {
+                self.nr41_written = true;
+                data
+            },
+            _ => data,
+        };
+        self.memory[addr] = set_val;
+    }
+
+    pub fn apu_reg_get(&self, addr : usize) -> u8 {
+        match addr {
+            0xFF10 => self.memory[addr] | 0x80,
+            0xFF11 => self.memory[addr] | 0x3F,
+            0xFF12 => self.memory[addr] | 0x00,
+            0xFF13 => self.memory[addr] | 0xFF,
+            0xFF14 => self.memory[addr] | 0xBF,
+
+            0xFF15 => self.memory[addr] | 0xFF,
+            0xFF16 => self.memory[addr] | 0x3F,
+            0xFF17 => self.memory[addr] | 0x00,
+            0xFF18 => self.memory[addr] | 0xFF,
+            0xFF19 => self.memory[addr] | 0xBF,
+
+            0xFF1A => self.memory[addr] | 0x7F,
+            0xFF1B => self.memory[addr] | 0xFF,
+            0xFF1C => self.memory[addr] | 0x9F,
+            0xFF1D => self.memory[addr] | 0xFF,
+            0xFF1E => self.memory[addr] | 0xBF,
+
+            0xFF1F => self.memory[addr] | 0xFF,
+            0xFF20 => self.memory[addr] | 0xFF,
+            0xFF21 => self.memory[addr] | 0x00,
+            0xFF22 => self.memory[addr] | 0x00,
+            0xFF23 => self.memory[addr] | 0xBF,
+
+            0xFF24 => self.memory[addr] | 0x00,
+            0xFF25 => self.memory[addr] | 0x00,
+            0xFF26 => {
+                //println!("READING FROM NR52 (actual val): 0b{:08b}", self.memory[addr]);
+                //println!("READING FROM NR52: 0b{:08b}", self.memory[addr] | 0x70);
+                self.memory[addr] | 0x70
+            },
+
+            0xFF27 => self.memory[addr] | 0xFF,
+            0xFF28 => self.memory[addr] | 0xFF,
+            0xFF29 => self.memory[addr] | 0xFF,
+            0xFF2A => self.memory[addr] | 0xFF,
+            0xFF2B => self.memory[addr] | 0xFF,
+            0xFF2C => self.memory[addr] | 0xFF,
+            0xFF2D => self.memory[addr] | 0xFF,
+            0xFF2E => self.memory[addr] | 0xFF,
+            0xFF2F => self.memory[addr] | 0xFF,
+
+            // 0xFF30-0xFF3F (WAVE RAM) (16 bytes) 
+            0xFF30 => self.memory[addr] | 0x00,
+            0xFF31 => self.memory[addr] | 0x00,
+            0xFF32 => self.memory[addr] | 0x00,
+            0xFF33 => self.memory[addr] | 0x00,
+            0xFF34 => self.memory[addr] | 0x00,
+            0xFF35 => self.memory[addr] | 0x00,
+            0xFF36 => self.memory[addr] | 0x00,
+            0xFF37 => self.memory[addr] | 0x00,
+            0xFF38 => self.memory[addr] | 0x00,
+            0xFF39 => self.memory[addr] | 0x00,
+            0xFF3A => self.memory[addr] | 0x00,
+            0xFF3B => self.memory[addr] | 0x00,
+            0xFF3C => self.memory[addr] | 0x00,
+            0xFF3D => self.memory[addr] | 0x00,
+            0xFF3E => self.memory[addr] | 0x00,
+            0xFF3F => self.memory[addr] | 0x00,
+            _ => 0xFF // TODO is this what we want..?
+        }
+    }
+
+
 
     pub fn set_joypad_state(&mut self, data : u8) {
         self.joypad_state = data;
@@ -233,6 +343,16 @@ impl MMU {
         }
     }
 
+    // we need a function that just bypasses all the bullshit
+    pub fn set_raw_byte(&mut self, mut addr: usize, data : u8) {
+        self.memory[addr] = data;        
+    }
+
+    pub fn get_raw_byte(&mut self, mut addr: usize) -> u8 {
+        return self.memory[addr];
+    }
+
+
     pub fn set_byte(&mut self, mut addr: usize, data : u8) {
         if echo_ram(addr) { addr = echo_ram_sub(addr); }
 
@@ -244,6 +364,12 @@ impl MMU {
 
         if addr == 0xFF01 {
             println!("SERIAL: {}", data);
+        }
+
+
+        if (addr >= 0xFF10) && (addr <= 0xFF3F) {
+            self.apu_reg_set(addr, data);
+            return;
         }
 
         // OAM DMA
@@ -376,6 +502,10 @@ impl MMU {
 
         if addr < 0x0100 && (self.get_boot() == 0) {
             return self.boot_rom[addr];
+        }
+
+        if (addr >= 0xFF10) && (addr <= 0xFF3F) {
+            return self.apu_reg_get(addr);
         }
 
         if self.is_cgb_register(addr) {

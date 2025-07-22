@@ -3,13 +3,18 @@ use std::fs::File;
 use std::io::prelude::*;
 use std::path::Path;
 
-use macroquad::prelude::*;
+
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use std::sync::mpsc;
+use macroquad::prelude::*;
+
 
 mod cpu;
 mod mmu;
 mod ppu;
-//mod apu;
+mod apu;
 mod cpu_tables;
 mod disassembler;
 
@@ -21,6 +26,41 @@ const CYCLES_PER_FRAME: u32 = CPU_FREQUENCY / FRAME_RATE;
 const GB_SCREEN_DIM : u32 = 23040; // 160x144
 const SCREEN_UPSCALE_FACTOR : f32 = 5.0; // gameboy screen is super tiny, so we upscale it
 
+
+pub struct SimpleAudio {
+    _stream: cpal::Stream,
+}
+
+
+impl SimpleAudio {
+    pub fn new() -> (Self, mpsc::Sender<f32>) {
+        let host = cpal::default_host();
+        let device = host.default_output_device().unwrap();
+        let config = device.default_output_config().unwrap();
+        
+        // Create a channel for sending samples from APU to audio thread
+        let (sample_sender, sample_receiver) = mpsc::channel::<f32>();
+        
+        let stream = device.build_output_stream(
+            &config.into(),
+            move |data: &mut [f32], _| {
+                for sample in data.iter_mut() {
+                    // Try to get a sample from the APU
+                    match sample_receiver.try_recv() {
+                        Ok(apu_sample) => *sample = apu_sample,
+                        Err(_) => *sample = 0.0,  // No sample available = silence
+                    }
+                }
+            },
+            |_| {},
+            None,
+        ).unwrap();
+        
+        stream.play().unwrap();
+        
+        (Self { _stream: stream }, sample_sender)
+    }
+}
 
 
 fn handle_input(mmu: &mut mmu::MMU) {
@@ -86,14 +126,18 @@ pub fn load_file_bytes(path: &str) -> Vec<u8> {
 }
 
 
+
+
 #[macroquad::main("Fierce Deity's GB")]
 async fn main() {
     let args: Vec<String> = env::args().collect();
 
+    let (audio, sender) = SimpleAudio::new();
+
     let mut mmu = mmu::MMU::new();
     let mut cpu = cpu::CPU::new();
     let mut ppu = ppu::PPU::new();
-    //let apu = apu::APU::new(mmu_ref);
+    let mut apu = apu::APU::new(sender);
     
     /*
     let path = Path::new(&args[1]);
@@ -167,6 +211,7 @@ async fn main() {
         let cycles = cpu.cycle(&mut mmu);
         //println!("CYCLES: {}, rendered_yet: {}", cycles, rendered_yet);
         ppu.cycle(cycles, &mut mmu);
+        apu.cycle(cycles, &mut mmu);
 
         handle_input(&mut mmu);
 
@@ -248,6 +293,9 @@ async fn main() {
             last_frame_time = Instant::now();
 
             draw_text(&fps_display, 10.0, 20.0, 30.0, BLACK);
+
+
+
             next_frame().await;
         }
     }

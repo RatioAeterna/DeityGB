@@ -8,6 +8,10 @@ edition = "2018"
 
 # Keeping here for future reference in case it's needed
 
+#[patch.crates-io]
+#macroquad = { path = "macroquad" }  # Adjust path to where you cloned it
+
 [dependencies]
-macroquad = "0.4"
+macroquad = "=0.4.0"
 csv = "1.3.1"
+cpal = "0.16"
