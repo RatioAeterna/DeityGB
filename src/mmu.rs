@@ -68,6 +68,8 @@ pub struct MMU {
         pub nr21_written : bool,
         pub nr31_written : bool,
         pub nr41_written : bool,
+
+        pub div_apu_increment_flag : bool,
 }
 
 fn echo_ram_sub(addr: usize) -> usize {
@@ -105,6 +107,8 @@ impl MMU {
             nr21_written : false,
             nr31_written : false,
             nr41_written : false,
+
+            div_apu_increment_flag : false,
         }
     }
 
@@ -439,6 +443,12 @@ impl MMU {
         }
         
         if addr == 0xFF04 { // DIV write resets it
+            // DIV-APU increment, if any
+            let old_val = self.div_internal;
+            let actual_old_val = old_val >> 8;
+            if (actual_old_val & 0b00010000) != 0 {
+                self.div_apu_increment_flag = true;
+            }
             self.div_internal = 0;
         }
         //handle_bank_switch(addr, data);
@@ -446,10 +456,18 @@ impl MMU {
     }
 
     pub fn increment_div(&mut self, cycles : u8) {
+        let old_val = self.div_internal;
         self.div_internal = self.div_internal.wrapping_add(cycles as u16); 
         //println!("DIV INTERNAL: {:#04x}, cycles: {}", self.div_internal, cycles);
         //
         //println!("DIV INTERNAL: {} aka {:016b}, cycles: {}", self.div_internal, self.div_internal, cycles);
+        // DIV-APU increment, if any
+        let actual_old_div = old_val >> 8;
+        let actual_new_div = self.div_internal >> 8;
+
+        if ((actual_old_div & 0b00010000) != 0) && ((actual_new_div & 0b00010000) == 0) {
+            self.div_apu_increment_flag = true;
+        }
     }
 
     pub fn increment_tima(&mut self) {

@@ -19,7 +19,7 @@ pub struct APU {
     pub wave_length_counter : u8,
     pub noise_length_counter : u8,
 
-    pub length_timer : u16,
+    pub step : u8,
 }
 
 impl APU {
@@ -40,7 +40,7 @@ impl APU {
             wave_length_counter: 0,
             noise_length_counter: 0,
 
-            length_timer : 0,
+            step : 0,
         }
     }
 
@@ -145,58 +145,77 @@ impl APU {
 
         let nr14 = mmu.get_raw_byte(0xFF14);
         if (nr14 & 0x80) != 0 {
+            // Clear trigger bit (it's write-only, should read as 0)
+            //mmu.set_raw_byte(0xFF14, nr14 & !0x80);
+
             // Handle trigger
             let nr11 = mmu.get_raw_byte(0xFF11);
             self.square1_length_counter = 64 - (nr11 & 0x3F);
+
+            let nr13 = mmu.get_raw_byte(0xFF13);
+            let frequency = nr13 as u16 | ((nr14 as u16 & 0x07) << 8);
+            if frequency == 0 {
+                return;
+            }
+
             
             // Enable channel in NR52
             let nr52 = mmu.get_raw_byte(0xFF26);
             mmu.set_raw_byte(0xFF26, nr52 | 0b00000001);
-            
-            // Clear trigger bit (it's write-only, should read as 0)
-            mmu.set_raw_byte(0xFF14, nr14 & !0x80);
         }
 
         let nr24 = mmu.get_raw_byte(0xFF24);
         if (nr24 & 0x80) != 0 {
+            // Clear trigger bit (it's write-only, should read as 0)
+            //mmu.set_raw_byte(0xFF24, nr24 & !0x80);
+
             // Handle trigger
             let nr21 = mmu.get_raw_byte(0xFF16);
             self.square2_length_counter = 64 - (nr21 & 0x3F);
+
+            let nr23 = mmu.get_raw_byte(0xFF18);
+            let frequency = nr23 as u16 | ((nr24 as u16 & 0x07) << 8);
+            if frequency == 0 {
+                return;
+            }
             
             // Enable channel in NR52
             let nr52 = mmu.get_raw_byte(0xFF26);
-            mmu.set_raw_byte(0xFF26, nr52 | 0b00000001);
-            
-            // Clear trigger bit (it's write-only, should read as 0)
-            mmu.set_raw_byte(0xFF24, nr24 & !0x80);
+            mmu.set_raw_byte(0xFF26, nr52 | 0b00000010);
         }
 
         let nr34 = mmu.get_raw_byte(0xFF1E);
         if (nr34 & 0x80) != 0 {
+            // Clear trigger bit (it's write-only, should read as 0)
+            //mmu.set_raw_byte(0xFF1E, nr34 & !0x80);
+
             // Handle trigger
             let nr31 = mmu.get_raw_byte(0xFF1B);
             self.wave_length_counter = 64 - (nr31 & 0x3F);
+
+            let nr33 = mmu.get_raw_byte(0xFF1D);
+            let frequency = nr33 as u16 | ((nr34 as u16 & 0x07) << 8);
+            if frequency == 0 {
+                return;
+            }
             
             // Enable channel in NR52
             let nr52 = mmu.get_raw_byte(0xFF26);
-            mmu.set_raw_byte(0xFF26, nr52 | 0b00000001);
-            
-            // Clear trigger bit (it's write-only, should read as 0)
-            mmu.set_raw_byte(0xFF1E, nr34 & !0x80);
+            mmu.set_raw_byte(0xFF26, nr52 | 0b00000100);
         }
 
         let nr44 = mmu.get_raw_byte(0xFF23);
         if (nr44 & 0x80) != 0 {
+            // Clear trigger bit (it's write-only, should read as 0)
+            //mmu.set_raw_byte(0xFF23, nr44 & !0x80);
+
             // Handle trigger
             let nr41 = mmu.get_raw_byte(0xFF20);
             self.noise_length_counter = 64 - (nr41 & 0x3F);
             
             // Enable channel in NR52
             let nr52 = mmu.get_raw_byte(0xFF26);
-            mmu.set_raw_byte(0xFF26, nr52 | 0b00000001);
-            
-            // Clear trigger bit (it's write-only, should read as 0)
-            mmu.set_raw_byte(0xFF23, nr44 & !0x80);
+            mmu.set_raw_byte(0xFF26, nr52 | 0b00001000);
         }
     }
 
@@ -318,13 +337,22 @@ impl APU {
         let enabled = (mmu_ref.get_byte(0xFF26 as usize) & 0b10000000) != 0;
 
         if (!enabled) && (self.master_audio_enabled) {
-            //println!("CLEARING APU REGS");
+            println!("CLEARING APU REGS");
             for addr in 0xFF10..0xFF26 {
                 mmu_ref.set_raw_byte(addr as usize, 0);
             }
         }
         self.master_audio_enabled = enabled;
     }
+
+    pub fn div_apu_increment(&mut self, mmu_ref : &mut mmu::MMU)-> bool {
+        let val = mmu_ref.div_apu_increment_flag;
+        if val {
+            mmu_ref.div_apu_increment_flag = false;
+        }
+        return val;
+    }
+
 
     pub fn cycle(&mut self, t_cycles: u8, mmu_ref : &mut mmu::MMU) {
         self.accumulated_cycles = self.accumulated_cycles.wrapping_add(t_cycles as u16);
@@ -334,17 +362,16 @@ impl APU {
             return;
         }
 
-        /*
         self.check_triggers(mmu_ref);
 
-        self.length_timer += t_cycles as u16;
-        // TODO timing is imprecise here
-        if self.length_timer >= 15625 {
-            self.length_timer -= 15625;
-            self.update_length_counters(mmu_ref);
-        }
-        */
+        if self.div_apu_increment(mmu_ref) {
+            self.step = (self.step + 1) % 8;
 
+            // TODO do the other things we need to do
+            if (self.step % 2) == 0 {
+                self.update_length_counters(mmu_ref);
+            }
+        }
 
         const CYCLES_PER_SAMPLE: u16 = 91;
         
