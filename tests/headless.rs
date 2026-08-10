@@ -14,6 +14,12 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     })
 }
 
+fn cgb_test_rom() -> Vec<u8> {
+    let mut rom = vec![0; 0x8000];
+    rom[0x0143] = 0x80;
+    rom
+}
+
 #[test]
 fn serial_transfer_records_internal_clock_byte() {
     let mut mmu = MMU::new();
@@ -30,6 +36,101 @@ fn serial_transfer_records_internal_clock_byte() {
 fn headless_framebuffer_is_rgba_sized() {
     let mut gb = GameBoy::new();
     assert_eq!(gb.framebuffer_rgba().len(), 160 * 144 * 4);
+}
+
+#[test]
+fn cgb_vram_and_wram_banks_are_isolated() {
+    let mut mmu = MMU::new();
+    mmu.load_rom(&cgb_test_rom());
+
+    mmu.set_byte(0x8000, 0x11);
+    mmu.set_byte(0xFF4F, 1);
+    mmu.set_byte(0x8000, 0x22);
+    assert_eq!(mmu.get_byte(0x8000), 0x22);
+    assert_eq!(mmu.read_vram_bank(0, 0x8000), 0x11);
+
+    mmu.set_byte(0xD000, 0x33);
+    mmu.set_byte(0xFF70, 0);
+    assert_eq!(mmu.get_byte(0xD000), 0x33);
+    assert_eq!(mmu.get_byte(0xFF70) & 0x07, 1);
+    mmu.set_byte(0xFF70, 2);
+    mmu.set_byte(0xD000, 0x44);
+    assert_eq!(mmu.get_byte(0xD000), 0x44);
+    mmu.set_byte(0xFF70, 1);
+    assert_eq!(mmu.get_byte(0xD000), 0x33);
+}
+
+#[test]
+fn cgb_palette_ports_auto_increment_and_decode_rgb555() {
+    let mut mmu = MMU::new();
+    mmu.load_rom(&cgb_test_rom());
+
+    mmu.set_byte(0xFF68, 0x80 | 10);
+    mmu.set_byte(0xFF69, 0x1F);
+    mmu.set_byte(0xFF69, 0x00);
+
+    assert_eq!(mmu.get_byte(0xFF68) & 0x3F, 12);
+    assert_eq!(mmu.cgb_bg_color(1, 1), 0x001F);
+}
+
+#[test]
+fn cgb_general_dma_copies_to_selected_vram_bank() {
+    let mut mmu = MMU::new();
+    mmu.load_rom(&cgb_test_rom());
+    for offset in 0..0x10 {
+        mmu.set_byte(0xC100 + offset, offset as u8 ^ 0xA5);
+    }
+    mmu.set_byte(0xFF4F, 1);
+    mmu.set_byte(0xFF51, 0xC1);
+    mmu.set_byte(0xFF52, 0x00);
+    mmu.set_byte(0xFF53, 0x00);
+    mmu.set_byte(0xFF54, 0x00);
+    mmu.set_byte(0xFF55, 0x00);
+
+    for offset in 0..0x10 {
+        assert_eq!(mmu.read_vram_bank(1, 0x8000 + offset), offset as u8 ^ 0xA5);
+    }
+    assert_eq!(mmu.get_byte(0xFF55), 0xFF);
+}
+
+#[test]
+fn cgb_boot_handoff_and_stop_switch_to_double_speed() {
+    let mut rom = cgb_test_rom();
+    rom[0] = 0x10; // STOP
+    rom[1] = 0x00; // STOP padding byte
+    let mut mmu = MMU::new();
+    let mut cpu = CPU::new();
+    mmu.load_rom(&rom);
+    mmu.set_raw_byte(0xFF50, 1);
+    mmu.set_byte(0xFF4D, 1);
+
+    assert_eq!(cpu.cycle(&mut mmu), 4);
+    assert_eq!(cpu.accumulator(), 0x11);
+    assert!(mmu.double_speed());
+    assert_eq!(mmu.get_byte(0xFF4D) & 0x81, 0x80);
+    assert!(cpu.cycle(&mut mmu) > 0);
+}
+
+#[test]
+fn cgb_ppu_uses_tile_attributes_and_color_palette() {
+    let mut mmu = MMU::new();
+    let mut ppu = PPU::new();
+    mmu.load_rom(&cgb_test_rom());
+    mmu.set_raw_byte(0xFF40, 0x91);
+    mmu.set_raw_byte(0xFF44, 0);
+
+    mmu.set_byte(0xFF4F, 0);
+    mmu.set_byte(0x9800, 0);
+    mmu.set_byte(0x8000, 0x80);
+    mmu.set_byte(0x8001, 0x00);
+    mmu.set_byte(0xFF4F, 1);
+    mmu.set_byte(0x9800, 0x01); // Palette 1.
+    mmu.set_byte(0xFF68, 0x80 | 10); // Palette 1, color 1.
+    mmu.set_byte(0xFF69, 0x1F);
+    mmu.set_byte(0xFF69, 0x00);
+
+    ppu.render_line(&mut mmu);
+    assert_eq!(&ppu.get_rgba_buffer()[0..4], &[0xFF, 0x00, 0x00, 0xFF]);
 }
 
 #[test]
@@ -175,6 +276,32 @@ fn mbc3_selects_seven_bit_rom_and_ram_banks() {
 }
 
 #[test]
+fn mbc3_rtc_ticks_halts_and_latches() {
+    let mut rom = vec![0; 0x8000];
+    rom[0x0147] = 0x10;
+    rom[0x0149] = 0x03;
+    let mut mmu = MMU::new();
+    mmu.load_rom(&rom);
+    mmu.set_byte(0x0000, 0x0A);
+    mmu.set_byte(0x4000, 0x08);
+
+    mmu.tick_rtc(DMG_CPU_FREQUENCY);
+    assert_eq!(mmu.get_byte(0xA000), 1);
+    mmu.set_byte(0x6000, 0);
+    mmu.set_byte(0x6000, 1);
+    mmu.tick_rtc(DMG_CPU_FREQUENCY);
+    assert_eq!(mmu.get_byte(0xA000), 1);
+
+    mmu.set_byte(0x4000, 0x0C);
+    mmu.set_byte(0xA000, 0x40);
+    mmu.tick_rtc(DMG_CPU_FREQUENCY);
+    mmu.set_byte(0x6000, 0);
+    mmu.set_byte(0x6000, 1);
+    mmu.set_byte(0x4000, 0x08);
+    assert_eq!(mmu.get_byte(0xA000), 2);
+}
+
+#[test]
 #[ignore = "runs the local Pokemon Red ROM for a deterministic title-to-menu smoke test"]
 fn pokemon_red_reaches_new_game_menu() {
     let rom = load_file(&repo_path("src/roms/pokemon_red.gb")).unwrap();
@@ -209,7 +336,28 @@ fn kirby_enters_green_greens_after_stage_intro() {
     gb.set_button(JoypadButton::Start, false);
     gb.run_for_cycles(DMG_CPU_FREQUENCY * 7);
 
-    assert_eq!(fnv1a(&gb.framebuffer_rgba()), 0xe214_9d85_9336_6ec9);
+    // CGB work also corrected DMG OBJ transparency and behind-BG priority.
+    assert_eq!(fnv1a(&gb.framebuffer_rgba()), 0xd5a4_c17f_b316_c4e3);
+}
+
+#[test]
+#[ignore = "runs the local Pokemon Silver ROM for a deterministic CGB title-screen smoke test"]
+fn pokemon_silver_reaches_color_title_screen() {
+    let rom = load_file(&repo_path("src/roms/pokemon_silver.gbc")).unwrap();
+    let boot = load_file(&default_boot_rom_path()).unwrap();
+    let mut gb = GameBoy::new();
+    gb.set_apu_enabled(false);
+    gb.load_boot_rom(&boot);
+    gb.load_rom(&rom);
+
+    gb.run_for_cycles(DMG_CPU_FREQUENCY * 38);
+    let rgba = gb.framebuffer_rgba();
+    let distinct_colors = rgba
+        .chunks_exact(4)
+        .map(|pixel| &pixel[..3])
+        .collect::<std::collections::HashSet<_>>();
+    assert!(distinct_colors.len() >= 3);
+    assert_eq!(fnv1a(&rgba), 0x726a_43cc_196d_20cf);
 }
 
 #[test]

@@ -14,6 +14,11 @@ struct MBC3 {
     ram_enabled: bool,
     rom_bank: u8,
     ram_bank: u8,
+    rtc: [u8; 5],
+    latched_rtc: [u8; 5],
+    rtc_latched: bool,
+    latch_write: u8,
+    rtc_cycles: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -66,6 +71,22 @@ pub struct MMU {
         pub boot_rom : Vec<u8>,
         pub rom_data : Vec<u8>,
         pub div_internal: u16,
+
+        cgb_mode: bool,
+        vram_bank: u8,
+        vram_bank_1: Vec<u8>,
+        wram_bank: u8,
+        wram_banks: Vec<u8>,
+        bg_palette_index: u8,
+        obj_palette_index: u8,
+        bg_palette_data: [u8; 64],
+        obj_palette_data: [u8; 64],
+        double_speed: bool,
+        speed_switch_armed: bool,
+        hdma_source: u16,
+        hdma_destination: u16,
+        hdma_blocks_remaining: u8,
+        hdma_active: bool,
 
         pub vram_banned : bool,
         pub oam_banned : bool,
@@ -128,6 +149,22 @@ impl MMU {
             rom_data : vec![],
             div_internal : 0,
 
+            cgb_mode: false,
+            vram_bank: 0,
+            vram_bank_1: vec![0; 0x2000],
+            wram_bank: 1,
+            wram_banks: vec![0; 8 * 0x1000],
+            bg_palette_index: 0,
+            obj_palette_index: 0,
+            bg_palette_data: [0xFF; 64],
+            obj_palette_data: [0xFF; 64],
+            double_speed: false,
+            speed_switch_armed: false,
+            hdma_source: 0,
+            hdma_destination: 0x8000,
+            hdma_blocks_remaining: 0,
+            hdma_active: false,
+
             vram_banned : false,
             oam_banned : false,
             joypad_state : 0xCF,
@@ -135,7 +172,16 @@ impl MMU {
             joypad_dpad: 0x0F,
             cartridge_type_code : 0x00,
             mbc1 : MBC1 { ram_enabled : false, rom_bank : 1, ram_bank : 0, banking_mode : 0 },
-            mbc3: MBC3 { ram_enabled: false, rom_bank: 1, ram_bank: 0 },
+            mbc3: MBC3 {
+                ram_enabled: false,
+                rom_bank: 1,
+                ram_bank: 0,
+                rtc: [0; 5],
+                latched_rtc: [0; 5],
+                rtc_latched: false,
+                latch_write: 0xFF,
+                rtc_cycles: 0,
+            },
             rom_banks : 0,
             ram_banks : 0,
 
@@ -169,12 +215,121 @@ impl MMU {
             0xFF4C..=0xFF4F
             | 0xFF51..=0xFF56
             | 0xFF68..=0xFF6C
-            | 0xFF6C
             | 0xFF70
             | 0xFF76
             | 0xFF77
         )
 
+    }
+
+    pub fn cgb_mode(&self) -> bool {
+        self.cgb_mode
+    }
+
+    pub fn double_speed(&self) -> bool {
+        self.double_speed
+    }
+
+    pub fn peripheral_cycles(&self, cpu_cycles: u8) -> u8 {
+        if self.double_speed { cpu_cycles / 2 } else { cpu_cycles }
+    }
+
+    pub fn tick_rtc(&mut self, base_cycles: u64) {
+        if !self.has_mbc3_rtc() || self.mbc3.rtc[4] & 0x40 != 0 {
+            return;
+        }
+        self.mbc3.rtc_cycles += base_cycles;
+        while self.mbc3.rtc_cycles >= 4_194_304 {
+            self.mbc3.rtc_cycles -= 4_194_304;
+            self.increment_rtc_second();
+        }
+    }
+
+    fn increment_rtc_second(&mut self) {
+        self.mbc3.rtc[0] += 1;
+        if self.mbc3.rtc[0] < 60 {
+            return;
+        }
+        self.mbc3.rtc[0] = 0;
+        self.mbc3.rtc[1] += 1;
+        if self.mbc3.rtc[1] < 60 {
+            return;
+        }
+        self.mbc3.rtc[1] = 0;
+        self.mbc3.rtc[2] += 1;
+        if self.mbc3.rtc[2] < 24 {
+            return;
+        }
+        self.mbc3.rtc[2] = 0;
+        let day = u16::from(self.mbc3.rtc[3]) | (u16::from(self.mbc3.rtc[4] & 1) << 8);
+        let next_day = day + 1;
+        self.mbc3.rtc[3] = next_day as u8;
+        self.mbc3.rtc[4] = (self.mbc3.rtc[4] & 0xC0) | ((next_day >> 8) as u8 & 1);
+        if next_day > 0x1FF {
+            self.mbc3.rtc[3] = 0;
+            self.mbc3.rtc[4] = (self.mbc3.rtc[4] & 0x40) | 0x80;
+        }
+    }
+
+    pub fn perform_speed_switch(&mut self) -> bool {
+        if !self.cgb_mode || !self.speed_switch_armed {
+            return false;
+        }
+        self.double_speed = !self.double_speed;
+        self.speed_switch_armed = false;
+        true
+    }
+
+    pub fn read_vram_bank(&self, bank: u8, addr: usize) -> u8 {
+        debug_assert!((0x8000..=0x9FFF).contains(&addr));
+        if bank & 1 == 0 {
+            self.memory[addr]
+        } else {
+            self.vram_bank_1[addr - 0x8000]
+        }
+    }
+
+    fn write_vram_bank(&mut self, bank: u8, addr: usize, data: u8) {
+        debug_assert!((0x8000..=0x9FFF).contains(&addr));
+        if bank & 1 == 0 {
+            self.memory[addr] = data;
+        } else {
+            self.vram_bank_1[addr - 0x8000] = data;
+        }
+    }
+
+    pub fn cgb_bg_color(&self, palette: u8, color: u8) -> u16 {
+        self.cgb_palette_color(false, palette, color)
+    }
+
+    pub fn cgb_obj_color(&self, palette: u8, color: u8) -> u16 {
+        self.cgb_palette_color(true, palette, color)
+    }
+
+    fn cgb_palette_color(&self, object: bool, palette: u8, color: u8) -> u16 {
+        let data = if object { &self.obj_palette_data } else { &self.bg_palette_data };
+        let offset = ((palette as usize & 7) * 8) + ((color as usize & 3) * 2);
+        u16::from(data[offset]) | (u16::from(data[offset + 1]) << 8)
+    }
+
+    fn transfer_hdma_block(&mut self) {
+        for offset in 0..0x10u16 {
+            let value = self.get_byte(self.hdma_source.wrapping_add(offset) as usize);
+            let destination = 0x8000 | (self.hdma_destination.wrapping_add(offset) & 0x1FFF);
+            self.write_vram_bank(self.vram_bank, destination as usize, value);
+        }
+        self.hdma_source = self.hdma_source.wrapping_add(0x10);
+        self.hdma_destination = 0x8000 | (self.hdma_destination.wrapping_add(0x10) & 0x1FFF);
+        self.hdma_blocks_remaining = self.hdma_blocks_remaining.saturating_sub(1);
+        if self.hdma_blocks_remaining == 0 {
+            self.hdma_active = false;
+        }
+    }
+
+    pub fn hdma_hblank_step(&mut self) {
+        if self.cgb_mode && self.hdma_active {
+            self.transfer_hdma_block();
+        }
     }
 
     pub fn apu_reg_set(&mut self, addr : usize, data : u8) {
@@ -371,6 +526,10 @@ impl MMU {
     fn is_mbc3(&self) -> bool {
         matches!(self.cartridge_type_code, 0x0F..=0x13)
     }
+
+    fn has_mbc3_rtc(&self) -> bool {
+        matches!(self.cartridge_type_code, 0x0F | 0x10)
+    }
     
     fn compute_zero_bank_number(&self) -> u8 {
         if self.rom_banks <= 32 {
@@ -441,6 +600,14 @@ impl MMU {
             return 0xFF;
         }
         if self.is_mbc3() && ram_bank > 3 {
+            if self.has_mbc3_rtc() && (0x08..=0x0C).contains(&ram_bank) {
+                let rtc = if self.mbc3.rtc_latched {
+                    &self.mbc3.latched_rtc
+                } else {
+                    &self.mbc3.rtc
+                };
+                return rtc[(ram_bank - 0x08) as usize];
+            }
             return 0xFF;
         }
         if self.ram_size == 0 {
@@ -475,6 +642,16 @@ impl MMU {
             return;
         }
         if self.is_mbc3() && ram_bank > 3 {
+            if self.has_mbc3_rtc() && (0x08..=0x0C).contains(&ram_bank) {
+                let index = (ram_bank - 0x08) as usize;
+                self.mbc3.rtc[index] = match ram_bank {
+                    0x08 | 0x09 => data & 0x3F,
+                    0x0A => data & 0x1F,
+                    0x0B => data,
+                    0x0C => data & 0xC1,
+                    _ => unreachable!(),
+                };
+            }
             return;
         }
         if self.ram_size == 0 {
@@ -515,6 +692,85 @@ impl MMU {
 
     pub fn set_byte(&mut self, mut addr: usize, data : u8) {
         if echo_ram(addr) { addr = echo_ram_sub(addr); }
+
+        if self.cgb_mode {
+            match addr {
+                0xFF4D => {
+                    self.speed_switch_armed = data & 0x01 != 0;
+                    return;
+                }
+                0xFF4F => {
+                    self.vram_bank = data & 0x01;
+                    return;
+                }
+                0xFF51 => {
+                    self.hdma_source = (u16::from(data) << 8) | (self.hdma_source & 0x00FF);
+                    return;
+                }
+                0xFF52 => {
+                    self.hdma_source = (self.hdma_source & 0xFF00) | u16::from(data & 0xF0);
+                    return;
+                }
+                0xFF53 => {
+                    self.hdma_destination = 0x8000
+                        | (u16::from(data & 0x1F) << 8)
+                        | (self.hdma_destination & 0x00FF);
+                    return;
+                }
+                0xFF54 => {
+                    self.hdma_destination = (self.hdma_destination & 0xFF00) | u16::from(data & 0xF0);
+                    return;
+                }
+                0xFF55 => {
+                    if self.hdma_active && data & 0x80 == 0 {
+                        self.hdma_active = false;
+                        return;
+                    }
+                    self.hdma_blocks_remaining = (data & 0x7F).wrapping_add(1);
+                    self.hdma_active = data & 0x80 != 0;
+                    if !self.hdma_active {
+                        while self.hdma_blocks_remaining != 0 {
+                            self.transfer_hdma_block();
+                        }
+                    }
+                    return;
+                }
+                0xFF68 => {
+                    self.bg_palette_index = data & 0xBF;
+                    return;
+                }
+                0xFF69 => {
+                    let index = (self.bg_palette_index & 0x3F) as usize;
+                    self.bg_palette_data[index] = data;
+                    if self.bg_palette_index & 0x80 != 0 {
+                        self.bg_palette_index = 0x80 | ((self.bg_palette_index + 1) & 0x3F);
+                    }
+                    return;
+                }
+                0xFF6A => {
+                    self.obj_palette_index = data & 0xBF;
+                    return;
+                }
+                0xFF6B => {
+                    let index = (self.obj_palette_index & 0x3F) as usize;
+                    self.obj_palette_data[index] = data;
+                    if self.obj_palette_index & 0x80 != 0 {
+                        self.obj_palette_index = 0x80 | ((self.obj_palette_index + 1) & 0x3F);
+                    }
+                    return;
+                }
+                0xFF6C => {
+                    self.memory[addr] = data & 0x01;
+                    return;
+                }
+                0xFF70 => {
+                    let bank = data & 0x07;
+                    self.wram_bank = if bank == 0 { 1 } else { bank };
+                    return;
+                }
+                _ => {}
+            }
+        }
 
         /*
         if addr == 0xFF45 {
@@ -613,7 +869,14 @@ impl MMU {
         if self.is_mbc3() && (0x4000..=0x5FFF).contains(&addr) {
             self.mbc3.ram_bank = data;
         }
-        // MBC3 RTC latching (6000-7FFF) is not needed for ROM/RAM banking.
+        if self.is_mbc3() && (0x6000..=0x7FFF).contains(&addr) {
+            if self.mbc3.latch_write == 0 && data == 1 {
+                self.mbc3.latched_rtc = self.mbc3.rtc;
+                self.mbc3.rtc_latched = true;
+            }
+            self.mbc3.latch_write = data;
+            return;
+        }
 
         if (self.is_mbc1() || self.is_mbc3()) && (addr >= 0xA000) && (addr <= 0xBFFF) {
             self.write_external_ram(addr, data);
@@ -626,6 +889,29 @@ impl MMU {
         // catch-all for writes to ROM (both valid and invalid)
         if addr < 0x8000 {
             //println!("ROM WRITE");
+            return;
+        }
+
+        if (0x8000..=0x9FFF).contains(&addr) {
+            if !self.vram_banned {
+                let bank = if self.cgb_mode { self.vram_bank } else { 0 };
+                self.write_vram_bank(bank, addr, data);
+            }
+            return;
+        }
+
+        if (0xC000..=0xCFFF).contains(&addr) {
+            self.memory[addr] = data;
+            return;
+        }
+
+        if (0xD000..=0xDFFF).contains(&addr) {
+            if self.cgb_mode && self.wram_bank > 1 {
+                let offset = self.wram_bank as usize * 0x1000 + (addr - 0xD000);
+                self.wram_banks[offset] = data;
+            } else {
+                self.memory[addr] = data;
+            }
             return;
         }
 
@@ -724,6 +1010,34 @@ impl MMU {
             return self.apu_reg_get(addr);
         }
 
+        if self.cgb_mode {
+            match addr {
+                0xFF4D => return (if self.double_speed { 0x80 } else { 0 })
+                    | 0x7E
+                    | u8::from(self.speed_switch_armed),
+                0xFF4F => return 0xFE | self.vram_bank,
+                0xFF51..=0xFF54 => return 0xFF,
+                0xFF55 => {
+                    return if self.hdma_active {
+                        self.hdma_blocks_remaining.saturating_sub(1) & 0x7F
+                    } else if self.hdma_blocks_remaining == 0 {
+                        0xFF
+                    } else {
+                        0x80 | self.hdma_blocks_remaining.saturating_sub(1)
+                    }
+                }
+                0xFF56 => return self.memory[addr] | 0x3C,
+                0xFF68 => return self.bg_palette_index | 0x40,
+                0xFF69 => return self.bg_palette_data[(self.bg_palette_index & 0x3F) as usize],
+                0xFF6A => return self.obj_palette_index | 0x40,
+                0xFF6B => return self.obj_palette_data[(self.obj_palette_index & 0x3F) as usize],
+                0xFF6C => return 0xFE | (self.memory[addr] & 0x01),
+                0xFF70 => return 0xF8 | self.wram_bank,
+                0xFF76 | 0xFF77 => return 0x00,
+                _ => {}
+            }
+        }
+
         if self.is_cgb_register(addr) {
             println!("TRYING TO READ : {:#04x}", addr);
             return 0xFF;
@@ -761,6 +1075,26 @@ impl MMU {
         }
         
         if addr == 0xFF01 {
+            return self.memory[addr];
+        }
+
+        if (0x8000..=0x9FFF).contains(&addr) {
+            if self.vram_banned {
+                return 0xFF;
+            }
+            let bank = if self.cgb_mode { self.vram_bank } else { 0 };
+            return self.read_vram_bank(bank, addr);
+        }
+
+        if (0xC000..=0xCFFF).contains(&addr) {
+            return self.memory[addr];
+        }
+
+        if (0xD000..=0xDFFF).contains(&addr) {
+            if self.cgb_mode && self.wram_bank > 1 {
+                let offset = self.wram_bank as usize * 0x1000 + (addr - 0xD000);
+                return self.wram_banks[offset];
+            }
             return self.memory[addr];
         }
 
@@ -834,6 +1168,22 @@ impl MMU {
     pub fn load_rom(&mut self, rom_data : &Vec<u8>) {
         self.rom_data = rom_data.to_vec();
 
+        self.cgb_mode = matches!(rom_data[0x0143], 0x80 | 0xC0);
+        self.vram_bank = 0;
+        self.wram_bank = 1;
+        self.double_speed = false;
+        self.speed_switch_armed = false;
+        self.hdma_active = false;
+        self.bg_palette_index = 0;
+        self.obj_palette_index = 0;
+        self.bg_palette_data = [0xFF; 64];
+        self.obj_palette_data = [0xFF; 64];
+        self.mbc3.rtc = [0; 5];
+        self.mbc3.latched_rtc = [0; 5];
+        self.mbc3.rtc_latched = false;
+        self.mbc3.latch_write = 0xFF;
+        self.mbc3.rtc_cycles = 0;
+
         self.cartridge_type_code = rom_data[0x0147];
         let rom_size_code = rom_data[0x0148];
         let ram_size_code = rom_data[0x0149];
@@ -880,6 +1230,7 @@ impl MMU {
         println!("ROM BANKS: {}", self.rom_banks);
         println!("RAM BANKS: {}", self.ram_banks);
         println!("do we even use ram: {}", do_we_even_use_ram);
+        println!("CGB MODE: {}", self.cgb_mode);
 
 
         // First, load fixed bank

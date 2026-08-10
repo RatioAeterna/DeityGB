@@ -500,6 +500,7 @@ pub struct CPU {
 
 	//Halt CPU & LCD display until button pressed.
 	stop_flag : bool,
+	cgb_handoff_done: bool,
 	
 	 //Power down CPU until an interrupt occurs. Use this whenever possible to reduce energy consumption
 	halt_flag : bool,
@@ -533,6 +534,7 @@ impl CPU  {
                 s : 0, p : 0,
                 pc : 0,
                 stop_flag : false,
+                cgb_handoff_done: false,
                 halt_flag : false,
                 ime: false,
                 ei_pending : false,
@@ -776,6 +778,16 @@ impl CPU  {
 
         // returns the number of cycles for the current instruction
         let cycles = self.decode_execute(next_opcode, mmu_ref, cb_prefix);
+
+        // The bundled DMG boot ROM cannot provide the CGB register state itself.
+        // Preserve its visual boot sequence, then expose CGB hardware to dual-mode
+        // cartridges through the documented A=0x11 handoff value.
+        if !self.cgb_handoff_done && mmu_ref.get_boot() != 0 {
+            if mmu_ref.cgb_mode() {
+                self.a = 0x11;
+            }
+            self.cgb_handoff_done = true;
+        }
 
         self.update_timers(cycles, mmu_ref);
 
@@ -1118,7 +1130,9 @@ impl CPU  {
                             0x0E => self.c = n,
                             0x0F => rrca(&mut self.a, &mut self.f),
                             0x10 => {
-                                self.stop_flag = true;
+                                if !mmu_ref.perform_speed_switch() {
+                                    self.stop_flag = true;
+                                }
                                 mmu_ref.set_byte(0xFF04 as usize, 0);
                             },
                             0x11 => self.set_de(nn),

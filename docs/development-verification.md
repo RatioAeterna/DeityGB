@@ -13,6 +13,7 @@ Run the macroquad frontend from the repository root with:
 
 ```sh
 nix develop --command cargo run --release --bin DeityGB -- src/roms/pokemon_red.gb
+nix develop --command cargo run --release --bin DeityGB -- src/roms/pokemon_silver.gbc
 ```
 
 Controls are WASD for the D-pad, J/K for A/B, Enter for Start, and Left Shift
@@ -54,7 +55,22 @@ nix develop --command cargo run --release --bin gb-headless -- src/roms/pokemon_
 for a short tap, such as `--press left@180/4`. The bundled
 Pokemon Red ROM currently reaches the New Game menu and proceeds through the
 intro into the player's bedroom with scripted input. Its cartridge uses the
-implemented MBC3 ROM/RAM banking subset; MBC3 RTC registers are not implemented.
+implemented MBC3 ROM/RAM banking and RTC registers.
+
+Pokemon Silver now boots as a CGB cartridge and reaches its native-color title
+screen. Its ignored visual regression checks both multiple RGB colors and an
+exact framebuffer hash:
+
+```sh
+nix develop --command cargo test --release --test headless pokemon_silver_reaches_color_title_screen -- --ignored --exact
+```
+
+Implemented CGB hardware includes VRAM bank 1 and `VBK`, WRAM banks and `SVBK`,
+RGB555 background/object palette RAM, tile and object attributes, CGB priority
+rules and `OPRI`, general/HBlank VRAM DMA, `KEY1`/`STOP` double-speed switching,
+and native RGBA output in both frontends. The bundled DMG boot animation is
+retained; after it unmaps, dual-mode cartridges receive the documented CGB
+handoff value in register A.
 
 Kirby's Dream Land has a deterministic title-to-gameplay regression covering
 its HALT/VBlank-driven Stage 1 transition:

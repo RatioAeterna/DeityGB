@@ -75,9 +75,11 @@ impl GameBoy {
         let bank = self.mmu.mapped_rom_bank(pc);
         let cycles = self.cpu.cycle(&mut self.mmu);
         assert!(cycles > 0, "CPU returned zero cycles at bank {:#04x}, PC {:#06x}", bank, pc);
-        self.ppu.cycle(cycles, &mut self.mmu);
+        let peripheral_cycles = self.mmu.peripheral_cycles(cycles);
+        self.mmu.tick_rtc(u64::from(peripheral_cycles));
+        self.ppu.cycle(peripheral_cycles, &mut self.mmu);
         if self.apu_enabled {
-            self.apu.cycle(cycles, &mut self.mmu);
+            self.apu.cycle(peripheral_cycles, &mut self.mmu);
             while self._audio_receiver.try_recv().is_ok() {}
         }
 
@@ -136,7 +138,7 @@ impl GameBoy {
     }
 
     pub fn framebuffer_rgba(&mut self) -> Vec<u8> {
-        packed_framebuffer_to_rgba(self.ppu.get_buffer())
+        self.ppu.get_rgba_buffer().to_vec()
     }
 
     fn report(&self, outcome: TestOutcome) -> RunReport {

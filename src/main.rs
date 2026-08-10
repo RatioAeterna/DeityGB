@@ -190,13 +190,8 @@ async fn main() {
     mmu.load_rom(&cartridge_byte_buffer);
 
     let mut accumulated_cycles: u32 = 0;
-    let mut gb_screen: [u8; 5760] = [0; 5760];
-
-    // NOTE: We have four pixels per bit, so we multiply by 4 once, and then there are four
-    // CHANNELS per pixel (rgba) so we multiply by 4 again.
-    let screen_dimension: usize = gb_screen.len() * 4 * 4;
     let mut screen_image = Image {
-        bytes: vec![0; screen_dimension],
+        bytes: vec![0; GB_SCREEN_DIM as usize * 4],
         width: 160,
         height: 144,
     };
@@ -229,11 +224,13 @@ async fn main() {
         // After accumulating 456 cycles, we render a single line with the PPU.
         // Once 144 lines are rendered, we enter VBlank, where we can safely copy the screen buffer to display it.
         let cycles = cpu.cycle(&mut mmu);
-        accumulated_cycles = accumulated_cycles.saturating_add(cycles as u32);
+        let peripheral_cycles = mmu.peripheral_cycles(cycles);
+        mmu.tick_rtc(u64::from(peripheral_cycles));
+        accumulated_cycles = accumulated_cycles.saturating_add(peripheral_cycles as u32);
         //println!("CYCLES: {}, rendered_yet: {}", cycles, rendered_yet);
-        ppu.cycle(cycles, &mut mmu);
+        ppu.cycle(peripheral_cycles, &mut mmu);
         if apu_enabled {
-            apu.cycle(cycles, &mut mmu);
+            apu.cycle(peripheral_cycles, &mut mmu);
         }
 
         let lcd_enabled = mmu.get_byte(0xFF40) & 0x80 != 0;
@@ -260,54 +257,10 @@ async fn main() {
         let vblank_frame_ready = ppu.reached_vblank() && !rendered_yet;
         if host_frame_due(vblank_frame_ready, accumulated_cycles) {
             if vblank_frame_ready {
-                gb_screen = *ppu.get_buffer();
+                screen_image.bytes.copy_from_slice(ppu.get_rgba_buffer());
                 rendered_yet = true;
             }
             accumulated_cycles = 0;
-
-            for i in 0..(gb_screen.len()) {
-                let four_pixels = gb_screen[i];
-
-                for j in (0..4).rev() {
-                    let pixel = (four_pixels & (0b11 << (j * 2))) >> (j * 2);
-                    // multiply by 16, because each group of four pixels,
-                    // "each byte of gb_screen", takes up 16 bytes in our final
-                    // render array.
-                    let pixel_idx = 16 * i + 4 * (3 - j);
-
-                    match pixel {
-                        // the alleged color scheme
-                        0b00 => {
-                            // white
-                            screen_image.bytes[pixel_idx + 0] = 0xC4;
-                            screen_image.bytes[pixel_idx + 1] = 0xCF;
-                            screen_image.bytes[pixel_idx + 2] = 0xA1;
-                        }
-                        0b01 => {
-                            // light gray
-                            screen_image.bytes[pixel_idx + 0] = 0x8B;
-                            screen_image.bytes[pixel_idx + 1] = 0xAC;
-                            screen_image.bytes[pixel_idx + 2] = 0x0F;
-                        }
-                        0b10 => {
-                            // dark gray
-                            screen_image.bytes[pixel_idx + 0] = 0x30;
-                            screen_image.bytes[pixel_idx + 1] = 0x62;
-                            screen_image.bytes[pixel_idx + 2] = 0x30;
-                        }
-                        0b11 => {
-                            // black
-                            screen_image.bytes[pixel_idx + 0] = 0x0F;
-                            screen_image.bytes[pixel_idx + 1] = 0x38;
-                            screen_image.bytes[pixel_idx + 2] = 0x0F;
-                        }
-
-                        _ => panic!("Invalid pixel value"),
-                    }
-                    // alpha channel
-                    screen_image.bytes[pixel_idx + 3] = 255;
-                }
-            }
             screen_texture.update(&screen_image);
             draw_texture_ex(
                 &screen_texture,

@@ -188,3 +188,186 @@ change was reverted before the final fix.
   Dock while DeityGB runs.
 - Kept all branding work isolated from emulation state and timing. The splash
   completes before the Game Boy core is constructed.
+
+## Game Boy Color / Pokemon Silver
+
+### Goal and Baseline
+
+The goal was not merely to make a CGB-capable ROM execute in DMG compatibility
+mode. Pokemon Silver needed to recognize color hardware, use its native tile
+attributes and palettes, and reach a visibly correct color title screen without
+regressing the now-playable Pokemon Red and Kirby paths.
+
+Before implementation, the emulator had a flat 64 KiB MMU, one 8 KiB VRAM
+bank, one fixed/switchable DMG WRAM arrangement, and a PPU framebuffer packed
+as four 2-bit monochrome pixels per byte. Macroquad and the headless runner each
+expanded that packed buffer into the four DMG green shades. CGB registers were
+mostly caught by a placeholder and ignored. `STOP` permanently stopped the CPU,
+and the frontend advanced every subsystem by the same CPU cycle count.
+
+The local Pokemon Silver cartridge was inspected before changing the core. Its
+header marks it as a dual-mode CGB cartridge (`0143=80`) using MBC3 with timer,
+RAM, and battery (`0147=10`), a 2 MiB / 128-bank ROM, and 32 KiB / four-bank
+external RAM. Its SHA-256 is
+`72b190859a59623cbef6c49d601f8de52c1d2331b4f08a8d2acc17274fc19a8c`.
+It already reached intro/name screens through the DMG path, which gave us a
+useful CPU/MBC baseline but proved that cartridge execution alone was not CGB
+support.
+
+The implementation was based on Pan Docs' memory map, CGB register, tile map,
+tile data, OAM, palette, priority, speed-switch, and VRAM DMA documentation.
+No implementation code was searched for or copied from another emulator.
+
+### CGB Mode Selection and Boot Handoff
+
+- `MMU::load_rom` now reads the cartridge CGB flag and records whether the
+  current machine should expose CGB hardware. CGB-only (`C0`) and dual-mode
+  (`80`) headers both select CGB mode; DMG cartridges retain the old path.
+- DeityGB still uses its bundled 256-byte DMG boot ROM, preserving the Nintendo
+  boot animation and the known working boot flow. That ROM cannot perform the
+  CGB boot ROM's final register initialization.
+- At the exact point where the boot ROM permanently unmaps itself through
+  `FF50`, the CPU performs a one-time compatibility handoff. For a CGB
+  cartridge it sets A to the documented CGB value `11`; for DMG cartridges it
+  leaves the accumulator untouched. Pokemon Silver consequently detects color
+  hardware and enters its CGB code path after the familiar DMG boot animation.
+- The handoff is explicitly one-shot so later reads/writes to boot state cannot
+  unexpectedly rewrite A during cartridge execution.
+
+### Banked CGB Memory and Registers
+
+- Added the second 8 KiB VRAM bank and implemented `VBK` (`FF4F`). CPU VRAM
+  reads/writes use the selected bank, while the PPU can explicitly read either
+  bank so tile IDs remain in bank 0 and tile attributes come from bank 1.
+- Added CGB WRAM banks 1-7 and implemented `SVBK` (`FF70`), including the
+  hardware rule that selecting bank 0 aliases bank 1. Bank 0 at `C000-CFFF`
+  remains fixed; `D000-DFFF` and its echo follow the selected bank.
+- Added 64-byte background and object palette RAM arrays. `BGPI/BGPD`
+  (`FF68-FF69`) and `OBPI/OBPD` (`FF6A-FF6B`) implement six-bit indices and
+  bit-7 auto-increment after data writes.
+- Palette entries are decoded as little-endian RGB555. Each five-bit channel is
+  expanded to eight bits for the frontend while bit 15 is ignored.
+- Implemented CGB object-priority mode `OPRI` (`FF6C`). OAM-index ordering is
+  used in the CGB default mode, while coordinate ordering remains available
+  through the register and remains the DMG behavior.
+- Implemented `KEY1` (`FF4D`) preparation/current-speed bits and `STOP`-driven
+  speed switching. A prepared CGB `STOP` toggles speed and continues execution;
+  an unprepared `STOP` retains the existing stopped-CPU behavior.
+- Added basic documented values for the remaining exposed CGB status ports so
+  CGB software no longer falls through the old noisy "unknown CGB register"
+  path for implemented hardware.
+
+### CGB VRAM DMA
+
+- Implemented `HDMA1-HDMA5` (`FF51-FF55`) source, destination, length, status,
+  cancellation, and mode selection.
+- General-purpose DMA copies all requested 16-byte blocks immediately into the
+  currently selected VRAM bank.
+- HBlank DMA records an active transfer and copies one 16-byte block whenever
+  the PPU enters HBlank on a visible scanline, updating source, destination,
+  remaining-block status, and completion state after each block.
+- Destination addresses are constrained to the documented `8000-9FF0` VRAM
+  range and both source/destination low nibbles are masked to 16-byte alignment.
+
+### Color PPU and Pixel Composition
+
+- Added an RGBA framebuffer alongside the existing packed 2-bit framebuffer.
+  The packed buffer remains available for old diagnostics, while RGBA is now
+  authoritative for display, screenshots, and visual regression hashes.
+- Background and window map tile IDs are fetched from VRAM bank 0. In CGB mode,
+  the corresponding byte in bank 1 supplies palette number, VRAM tile-data
+  bank, horizontal flip, vertical flip, and BG-priority attributes.
+- Signed (`8800/9000`) and unsigned (`8000`) tile-data addressing both accept a
+  VRAM bank. Flips are applied to the pixel position within each tile before
+  reading the two bitplanes.
+- The window renderer now follows CGB enable semantics and consumes the same
+  complete attribute set as the background. Window pixels replace both the
+  visible color and per-pixel priority metadata used by later OBJ composition.
+- Each rendered BG/window pixel records its raw two-bit color index and tile
+  priority in scanline-sized metadata buffers. Raw color is essential because
+  CGB sprite priority depends on whether the BG color number is zero, not on
+  the final RGB value.
+- OAM parsing now records the CGB tile-data bank and three-bit OBJ palette.
+  Sprite tile fetches support both banks, 8x8/8x16 selection, both flips,
+  clipping, and the existing ten-sprites-per-scanline selection limit.
+- CGB object composition implements LCDC bit 0 as the BG/window master-priority
+  control, BG color-zero transparency to OBJ, BG tile priority, OBJ's
+  behind-BG bit, and CGB OAM ordering. Transparent OBJ color zero never writes.
+- The shared compositor also fixed two latent DMG sprite errors: transparency
+  is now decided from raw OBJ color zero rather than the palette-mapped shade,
+  and the OBJ behind-BG flag now checks the raw BG color. This deliberately
+  changed Kirby's framebuffer while producing a visibly coherent Green Greens
+  scene, so its regression baseline was updated rather than preserving the bug.
+
+### Native RGBA Frontends and Timing
+
+- Macroquad now copies the PPU RGBA buffer directly into its texture at VBlank.
+  The old per-frame loop that unpacked 2-bit pixels and hard-coded four green
+  shades was removed.
+- The headless runner returns the exact same RGBA buffer, so automated captures
+  and the interactive frontend exercise one rendering path.
+- DMG rendering still maps through `BGP/OBP0/OBP1` to the exact previous green
+  values. Pokemon Red therefore retained its existing framebuffer hash despite
+  the frontend conversion moving into the PPU.
+- In double speed, CPU instructions and CPU timers continue using their full
+  cycle counts. PPU, APU, frontend frame accounting, and emulated RTC receive
+  half that count, keeping them at the base 4.194304 MHz domain documented for
+  CGB double-speed operation.
+
+### Pokemon Silver's MBC3 RTC
+
+- Pokemon Silver's cartridge type includes an MBC3 real-time clock, so leaving
+  RTC banks `08-0C` as `FF` would have produced broken clock behavior after the
+  colorful startup succeeded.
+- Added live seconds, minutes, hours, low day, and high day/control registers.
+  The day counter is nine bits and implements the halt and overflow/carry bits.
+- RTC registers can be selected through the existing MBC3 RAM-bank register and
+  read/written through `A000-BFFF` while cartridge RAM/RTC access is enabled.
+- Implemented the documented `0 -> 1` latch sequence in `6000-7FFF`. Reads use
+  a stable latched snapshot until the next latch while the live clock continues
+  advancing.
+- Time advances deterministically from emulated base-speed cycles rather than
+  host wall-clock time. This keeps headless runs and visual regressions
+  reproducible and naturally respects RTC halt.
+- This work intentionally did not restore save-file persistence. Cartridge RAM
+  and RTC state remain in memory only, separating CGB correctness from the
+  earlier persistence regression.
+
+### Regression Coverage and Evidence
+
+- Added focused tests for CGB VRAM bank isolation and `VBK` selection.
+- Added tests for WRAM bank isolation, `SVBK`, and bank-zero aliasing behavior.
+- Added palette-port tests covering auto-increment and RGB555 decoding.
+- Added a general VRAM DMA test proving a 16-byte source block reaches the
+  selected VRAM bank and completion reports `FF` through `HDMA5`.
+- Added a CPU test proving the one-time `A=11` boot handoff and a prepared
+  `STOP` transition into double speed without stopping execution.
+- Added a synthetic PPU test proving a bank-1 tile attribute selects CGB palette
+  1 and renders an exact red RGBA pixel from RGB555 data.
+- Added MBC3 RTC coverage for one-second advancement, stable latching, halt,
+  and relatching the live value.
+- Added an ignored Pokemon Silver title-screen regression. After 38 emulated
+  seconds it verifies multiple distinct RGB colors and FNV-1a framebuffer hash
+  `726a43cc196d20cf`.
+- Captured and visually inspected Pokemon Silver startup frames. The native
+  title screen shows the blue background, gold/red Pokemon logo, silver
+  subtitle, dark creature silhouette, multicolor ground, and white copyright
+  text instead of the four DMG greens.
+- Final active release suite: 16 passed, 5 ignored.
+- Pokemon Red retained exact hash `d70ba3bc7247de85`.
+- Kirby reached Green Greens and passed its corrected compositor hash
+  `d5a4c17fb316c4e3`.
+- The bundled Blargg `cpu_instrs` aggregate test passed all instruction groups.
+- `git diff --check` reported no whitespace errors, and all release targets
+  compiled as part of the test run.
+
+### Remaining Accuracy Boundaries
+
+- This uses the bundled 256-byte DMG boot ROM plus a documented register
+  handoff, not a dumped CGB boot ROM and its complete power-on register state.
+- VRAM DMA currently transfers correct data but does not stall the CPU for the
+  exact documented duration. OAM DMA remains the project's existing immediate
+  transfer model.
+- Palette access blocking during mode 3, infrared behavior, and CGB-specific
+  audio differences are not cycle-accurate. The APU remains a separate project.
+- RTC state and cartridge RAM are not yet persisted to disk.
