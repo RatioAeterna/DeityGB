@@ -14,6 +14,7 @@ Run the macroquad frontend from the repository root with:
 ```sh
 nix develop --command cargo run --release --bin DeityGB -- src/roms/pokemon_red.gb
 nix develop --command cargo run --release --bin DeityGB -- src/roms/pokemon_silver.gbc
+nix develop --command cargo run --release --bin DeityGB -- src/roms/links_awakening.gbc
 ```
 
 Append `--apu` to enable host audio:
@@ -84,6 +85,13 @@ its HALT/VBlank-driven Stage 1 transition:
 
 ```sh
 nix develop --command cargo test --release --test headless kirby_enters_green_greens_after_stage_intro -- --ignored --exact
+```
+
+Link's Awakening DX uses MBC5 and has a deterministic regression from its CGB
+title screen through file selection into Marin's opening house dialogue:
+
+```sh
+nix develop --command cargo test --release --test headless links_awakening_dx_reaches_opening_dialogue -- --ignored --exact
 ```
 
 The bundled Blargg `cpu_instrs` ROM passes all 11 groups. The cycle-exact

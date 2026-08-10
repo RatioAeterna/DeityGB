@@ -600,3 +600,55 @@ nix develop --command cargo run --release --bin gb-headless -- \
   "src/roms/gb-test-roms/dmg_sound/rom_singles/09-wave read while on.gb" \
   --seconds 30
 ```
+
+## Link's Awakening DX Startup and MBC5
+
+Link's Awakening DX initially panicked shortly after startup with the CPU at
+`PC=5C1B`, while diagnostics still reported switchable ROM bank 1. The cartridge
+header identified the actual architectural mismatch immediately:
+
+- title: `ZELDA`
+- CGB capability byte: `80`
+- cartridge type: `1B` (MBC5 + RAM + battery)
+- ROM size: 1 MiB / 64 banks
+- RAM size: 32 KiB / 4 banks
+
+Before this change, DeityGB recognized only MBC1 and MBC3. Writes to MBC5's bank
+registers therefore fell through the ROM-write catch-all and were ignored. The
+game jumped to an address that was valid in its requested bank, but DeityGB
+continued fetching bank 1; execution eventually encountered an unsupported
+zero-cycle path and the headless safety assertion exposed the bad mapping. This
+was a cartridge-controller failure, not a Link's Awakening-specific CPU bug.
+
+### MBC5 Mapping Model
+
+- Added independent MBC5 state for RAM enable, a nine-bit ROM bank, and a
+  four-bit RAM bank. MBC5 switchable bank zero is valid, unlike MBC1/MBC3's
+  common zero-to-one remapping rule.
+- Writes at `0000-1FFF` enable external RAM when the low nibble is `0A`.
+- Writes at `2000-2FFF` replace ROM-bank bits 0-7. Writes at `3000-3FFF` replace
+  bit 8 without disturbing the low byte. This supports the controller's full
+  512-bank address range even though Link's Awakening itself has 64 banks.
+- Writes at `4000-5FFF` select external RAM bank bits 0-3. ROM reads from
+  `0000-3FFF` remain fixed at bank 0; reads from `4000-7FFF` use the complete
+  selected MBC5 bank.
+- Cartridge RAM detection now includes MBC5 RAM and rumble+RAM type codes
+  `1A`, `1B`, `1D`, and `1E`. Link's Awakening consequently allocates the four
+  8 KiB banks declared by header RAM-size code `03` instead of reporting no RAM.
+- `mapped_rom_bank` now returns a 16-bit value so diagnostics and future tests
+  can represent MBC5 banks 256-511 without truncation.
+
+### Evidence and Regression
+
+- Added a synthetic 8 MiB MBC5 cartridge test. It selects bank 257 by writing
+  the low byte and ninth bit separately, verifies data from that bank, and then
+  proves external RAM bank 3 is isolated from bank 0.
+- The exact pre-fix Link's Awakening command previously panicked after entering
+  incorrectly mapped code. With MBC5 enabled it ran 45 emulated seconds, stayed
+  in a normal HALT/VBlank loop, and rendered the complete native-color title.
+- A deeper 75-second scripted run pressed through the title/file flow and
+  reached Marin's opening dialogue in Link's house with coherent CGB graphics.
+  That path is captured as an ignored framebuffer regression.
+- The existing `.sav` file is not consumed by this work. Save persistence remains
+  intentionally disabled; this test exercises newly allocated in-memory MBC5
+  RAM and starts from the game's normal empty-file behavior.

@@ -21,6 +21,13 @@ struct MBC3 {
     rtc_cycles: u64,
 }
 
+#[derive(Clone)]
+struct MBC5 {
+    ram_enabled: bool,
+    rom_bank: u16,
+    ram_bank: u8,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum JoypadButton {
     Right,
@@ -101,6 +108,7 @@ pub struct MMU {
 
         pub mbc1 : MBC1,
         mbc3: MBC3,
+        mbc5: MBC5,
 
         pub last_input_dpad : bool,
 
@@ -192,6 +200,7 @@ impl MMU {
                 latch_write: 0xFF,
                 rtc_cycles: 0,
             },
+            mbc5: MBC5 { ram_enabled: false, rom_bank: 1, ram_bank: 0 },
             rom_banks : 0,
             ram_banks : 0,
 
@@ -571,6 +580,10 @@ impl MMU {
         matches!(self.cartridge_type_code, 0x0F..=0x13)
     }
 
+    fn is_mbc5(&self) -> bool {
+        matches!(self.cartridge_type_code, 0x19..=0x1E)
+    }
+
     fn has_mbc3_rtc(&self) -> bool {
         matches!(self.cartridge_type_code, 0x0F | 0x10)
     }
@@ -619,18 +632,21 @@ impl MMU {
         }
     }
 
-    pub fn mapped_rom_bank(&self, addr: u16) -> u8 {
+    pub fn mapped_rom_bank(&self, addr: u16) -> u16 {
+        if self.is_mbc5() {
+            return if addr < 0x4000 { 0 } else if addr < 0x8000 { self.mbc5.rom_bank } else { 0 };
+        }
         if self.is_mbc3() {
-            return if addr < 0x4000 { 0 } else if addr < 0x8000 { self.mbc3.rom_bank } else { 0 };
+            return if addr < 0x4000 { 0 } else if addr < 0x8000 { self.mbc3.rom_bank.into() } else { 0 };
         }
         if addr < 0x4000 {
             if self.mbc1.banking_mode == 0 {
                 0
             } else {
-                self.compute_zero_bank_number()
+                self.compute_zero_bank_number().into()
             }
         } else if addr < 0x8000 {
-            self.compute_high_bank_number()
+            self.compute_high_bank_number().into()
         } else {
             0
         }
@@ -638,8 +654,8 @@ impl MMU {
 
     fn read_external_ram(&self, mut addr: usize) -> u8 {
         //println!("READING FROM RAM");
-        let ram_enabled = if self.is_mbc3() { self.mbc3.ram_enabled } else { self.mbc1.ram_enabled };
-        let ram_bank = if self.is_mbc3() { self.mbc3.ram_bank } else { self.mbc1.ram_bank };
+        let ram_enabled = if self.is_mbc5() { self.mbc5.ram_enabled } else if self.is_mbc3() { self.mbc3.ram_enabled } else { self.mbc1.ram_enabled };
+        let ram_bank = if self.is_mbc5() { self.mbc5.ram_bank } else if self.is_mbc3() { self.mbc3.ram_bank } else { self.mbc1.ram_bank };
         if !ram_enabled {
             return 0xFF;
         }
@@ -680,8 +696,8 @@ impl MMU {
 
     fn write_external_ram(&mut self, mut addr: usize, data : u8) {
         //println!("WRITING TO RAM");
-        let ram_enabled = if self.is_mbc3() { self.mbc3.ram_enabled } else { self.mbc1.ram_enabled };
-        let ram_bank = if self.is_mbc3() { self.mbc3.ram_bank } else { self.mbc1.ram_bank };
+        let ram_enabled = if self.is_mbc5() { self.mbc5.ram_enabled } else if self.is_mbc3() { self.mbc3.ram_enabled } else { self.mbc1.ram_enabled };
+        let ram_bank = if self.is_mbc5() { self.mbc5.ram_bank } else if self.is_mbc3() { self.mbc3.ram_bank } else { self.mbc1.ram_bank };
         if !ram_enabled {
             return;
         }
@@ -922,7 +938,22 @@ impl MMU {
             return;
         }
 
-        if (self.is_mbc1() || self.is_mbc3()) && (addr >= 0xA000) && (addr <= 0xBFFF) {
+        if self.is_mbc5() && addr <= 0x1FFF {
+            self.mbc5.ram_enabled = (data & 0x0F) == 0x0A;
+        }
+        if self.is_mbc5() && (0x2000..=0x2FFF).contains(&addr) {
+            self.mbc5.rom_bank = (self.mbc5.rom_bank & 0x100) | u16::from(data);
+            self.mbc5.rom_bank %= self.rom_banks as u16;
+        }
+        if self.is_mbc5() && (0x3000..=0x3FFF).contains(&addr) {
+            self.mbc5.rom_bank = (self.mbc5.rom_bank & 0xFF) | (u16::from(data & 1) << 8);
+            self.mbc5.rom_bank %= self.rom_banks as u16;
+        }
+        if self.is_mbc5() && (0x4000..=0x5FFF).contains(&addr) {
+            self.mbc5.ram_bank = data & 0x0F;
+        }
+
+        if (self.is_mbc1() || self.is_mbc3() || self.is_mbc5()) && (addr >= 0xA000) && (addr <= 0xBFFF) {
             self.write_external_ram(addr, data);
         }
 
@@ -1086,7 +1117,7 @@ impl MMU {
             return 0xFF;
         }
     
-        if self.is_mbc3() && addr <= 0x3FFF {
+        if (self.is_mbc3() || self.is_mbc5()) && addr <= 0x3FFF {
             return self.rom_data[addr];
         }
 
@@ -1101,14 +1132,14 @@ impl MMU {
             }
         }
 
-        if (self.is_mbc1() || self.is_mbc3()) && (addr >= 0x4000) && (addr <= 0x7FFF) {
-            let high_bank_number = if self.is_mbc3() { self.mbc3.rom_bank } else { self.compute_high_bank_number() };
+        if (self.is_mbc1() || self.is_mbc3() || self.is_mbc5()) && (addr >= 0x4000) && (addr <= 0x7FFF) {
+            let high_bank_number = if self.is_mbc5() { self.mbc5.rom_bank as usize } else if self.is_mbc3() { self.mbc3.rom_bank as usize } else { self.compute_high_bank_number() as usize };
             //println!("HIGH BANK NUMBER {}", high_bank_number);
-            let bank_offset = high_bank_number as usize * 0x4000;
+            let bank_offset = high_bank_number * 0x4000;
             return self.rom_data[bank_offset + (addr - 0x4000) as usize]
         }
 
-        if (self.is_mbc1() || self.is_mbc3()) && (addr >= 0xA000) && (addr <= 0xBFFF) {
+        if (self.is_mbc1() || self.is_mbc3() || self.is_mbc5()) && (addr >= 0xA000) && (addr <= 0xBFFF) {
             return self.read_external_ram(addr);
         }
 
@@ -1226,13 +1257,16 @@ impl MMU {
         self.mbc3.rtc_latched = false;
         self.mbc3.latch_write = 0xFF;
         self.mbc3.rtc_cycles = 0;
+        self.mbc5.ram_enabled = false;
+        self.mbc5.rom_bank = 1;
+        self.mbc5.ram_bank = 0;
 
         self.cartridge_type_code = rom_data[0x0147];
         let rom_size_code = rom_data[0x0148];
         let ram_size_code = rom_data[0x0149];
 
 
-        let do_we_even_use_ram = matches!(self.cartridge_type_code, 0x02 | 0x03 | 0x10 | 0x12 | 0x13);
+        let do_we_even_use_ram = matches!(self.cartridge_type_code, 0x02 | 0x03 | 0x10 | 0x12 | 0x13 | 0x1A | 0x1B | 0x1D | 0x1E);
 
         self.rom_banks = match rom_size_code {
             0x00 => 2,    

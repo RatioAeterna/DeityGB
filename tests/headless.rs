@@ -1,6 +1,8 @@
 use deitygb::apu::APU;
 use deitygb::cpu::CPU;
-use deitygb::headless::{default_boot_rom_path, load_file, GameBoy, TestOutcome, DMG_CPU_FREQUENCY};
+use deitygb::headless::{
+    default_boot_rom_path, load_file, GameBoy, TestOutcome, DMG_CPU_FREQUENCY, DMG_FRAME_CYCLES,
+};
 use deitygb::mmu::{JoypadButton, MMU};
 use deitygb::ppu::{PPU, Sprite};
 use std::path::{Path, PathBuf};
@@ -310,6 +312,33 @@ fn mbc3_selects_seven_bit_rom_and_ram_banks() {
 }
 
 #[test]
+fn mbc5_selects_nine_bit_rom_and_four_bit_ram_banks() {
+    let mut rom = vec![0; 512 * 0x4000];
+    rom[0x0147] = 0x1B;
+    rom[0x0148] = 0x08;
+    rom[0x0149] = 0x03;
+    rom[1 * 0x4000] = 0x11;
+    rom[257 * 0x4000] = 0x57;
+
+    let mut mmu = MMU::new();
+    mmu.load_rom(&rom);
+    mmu.set_raw_byte(0xFF50, 1);
+    assert_eq!(mmu.get_byte(0x4000), 0x11);
+    mmu.set_byte(0x2000, 1);
+    mmu.set_byte(0x3000, 1);
+    assert_eq!(mmu.mapped_rom_bank(0x4000), 257);
+    assert_eq!(mmu.get_byte(0x4000), 0x57);
+
+    mmu.set_byte(0x0000, 0x0A);
+    mmu.set_byte(0x4000, 3);
+    mmu.set_byte(0xA000, 0x5A);
+    mmu.set_byte(0x4000, 0);
+    assert_eq!(mmu.get_byte(0xA000), 0);
+    mmu.set_byte(0x4000, 3);
+    assert_eq!(mmu.get_byte(0xA000), 0x5A);
+}
+
+#[test]
 fn mbc3_rtc_ticks_halts_and_latches() {
     let mut rom = vec![0; 0x8000];
     rom[0x0147] = 0x10;
@@ -392,6 +421,36 @@ fn pokemon_silver_reaches_color_title_screen() {
         .collect::<std::collections::HashSet<_>>();
     assert!(distinct_colors.len() >= 3);
     assert_eq!(fnv1a(&rgba), 0x726a_43cc_196d_20cf);
+}
+
+#[test]
+#[ignore = "runs Link's Awakening DX from title into the opening house scene"]
+fn links_awakening_dx_reaches_opening_dialogue() {
+    let rom = load_file(&repo_path("src/roms/links_awakening.gbc")).unwrap();
+    let boot = load_file(&default_boot_rom_path()).unwrap();
+    let mut gb = GameBoy::new();
+    gb.load_boot_rom(&boot);
+    gb.load_rom(&rom);
+
+    let events = [
+        (18, JoypadButton::Start),
+        (25, JoypadButton::Start),
+        (32, JoypadButton::A),
+        (38, JoypadButton::A),
+        (45, JoypadButton::Start),
+        (52, JoypadButton::A),
+    ];
+    let mut second = 0;
+    for (event_second, button) in events {
+        gb.run_for_cycles(DMG_CPU_FREQUENCY * (event_second - second));
+        gb.set_button(button, true);
+        gb.run_for_cycles(DMG_FRAME_CYCLES * 4);
+        gb.set_button(button, false);
+        second = event_second;
+    }
+    gb.run_for_cycles(DMG_CPU_FREQUENCY * (75 - second));
+
+    assert_eq!(fnv1a(&gb.framebuffer_rgba()), 0xa496_46be_eec5_c5f2);
 }
 
 #[test]
