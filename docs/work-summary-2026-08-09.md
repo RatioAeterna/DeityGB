@@ -585,6 +585,94 @@ nix develop --command cargo test --release --test headless \
   blargg_sound_core_roms_pass -- --ignored --exact
 ```
 
+## DMG and CGB Acid2 PPU Completion
+
+The Acid2 ROMs are compact visual specifications for the line renderer. They do
+not require a dot-accurate FIFO: both tests make their scanline-specific register
+writes during mode 2 and intentionally accept a line-based implementation. This
+makes them a useful boundary test for DeityGB's current PPU architecture.
+
+### Establishing the Baseline Correctly
+
+The first one- and two-second DMG captures showed only the Nintendo logo because
+the bundled boot animation had not completed. Capturing at eight emulated seconds
+allowed the ROM to finish drawing and exposed the real result. Nearly the entire
+face already matched the official image: text, hair suppression, both eyes,
+sprite priority, nose flips, mouth construction, and footer were correct. Only
+the right edge of the chin was absent. The newly added official CGB test ROM
+produced the same isolated omission in native color.
+
+Using the test author's reference images made verification objective:
+
+- CGB output is identical in all 160 x 144 RGB pixels.
+- DMG output is identical in all 160 x 144 two-bit shade indices after mapping
+  DeityGB's four green LCD colors to the reference image's four grayscale levels.
+- The green DMG palette remains a presentation choice; changing it is not needed
+  for PPU correctness because BGP still selects the same four hardware shades.
+
+### What Acid2 Exercises
+
+The completed images jointly cover the renderer's major composition rules:
+
+- The `HELLO WORLD!` row selects only the first ten OAM entries intersecting a
+  scanline, so the eleventh white object cannot hide the background exclamation.
+- DMG background disable draws BGP color 0, hiding the mohawk background tiles.
+- Background and window tile-data selection switches between unsigned `8000`
+  addressing and signed tile indices centered at `9000`.
+- CGB tile attributes select VRAM bank, horizontal/vertical flip, palette, and
+  BG-to-OBJ priority independently for every background/window tile.
+- DMG object priority resolves lower X first and then lower OAM index; CGB's
+  `OPRI` mode resolves the intended OAM-order priority.
+- Transparent object color 0 does not replace the composed background, while
+  nonzero object pixels obey object-behind-background and CGB master-priority
+  rules.
+- Eight-by-sixteen objects ignore tile-index bit 0 and choose the second tile
+  after applying vertical flip, which builds the curved mouth correctly.
+- Background map selection and signed tile addressing change again for the
+  footer without disturbing the face already rendered above it.
+
+### The Window Counter Bug
+
+The window has an internal Y counter separate from `LY` and `WY`. It increments
+only on scanlines where the window is actually drawn. Hiding the window does not
+rewind it; the next visible window line resumes where the earlier region stopped.
+
+DeityGB reset `window_line_counter` whenever LCDC disabled the window. Acid2
+draws the right eye with the window for 16 lines, hides it by moving `WX` off
+screen, changes the window tile map, and later re-enables it for the right chin.
+Resetting on the temporary hide made the chin read map row 0 instead of row 2,
+so only that side disappeared. The correction is deliberately narrow:
+
+- A disabled or off-screen window pauses the counter.
+- A visible window scanline increments it once after drawing.
+- LCD disable and the start of a new frame still reset it to zero.
+
+This is shared hardware behavior, so the same correction completes both DMG and
+CGB Acid2 instead of introducing mode-specific rendering paths.
+
+### Visual Regression Contract
+
+Two ignored release tests now boot each local Acid2 ROM for eight emulated
+seconds and compare the complete RGBA framebuffer using a 64-bit FNV-1a hash.
+The expected hashes were recorded only after direct pixel comparison against the
+official reference images reported zero differences. Any future change to tile
+addressing, object selection, priority, window visibility, palettes, or scanline
+state will therefore fail a single deterministic test rather than relying on a
+manual screenshot inspection.
+
+Run them with:
+
+```sh
+nix develop --command cargo test --release --test headless \
+  dmg_acid2_matches_reference_layout -- --ignored --exact
+nix develop --command cargo test --release --test headless \
+  cgb_acid2_matches_reference_image -- --ignored --exact
+```
+
+The implementation was derived from Pan Docs and the Acid2 authors' test guide,
+source-level behavior descriptions, and official reference images. No other
+emulator implementation was used or copied.
+
 Interactive CGB gameplay with audio:
 
 ```sh

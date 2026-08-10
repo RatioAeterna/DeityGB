@@ -46,10 +46,21 @@ tests send `3, 5, 8, 13, 21, 34`; failing tests send `0x42` six times.
 ## Visual Snapshots
 
 ```sh
-nix develop --command cargo run --bin gb-headless -- src/roms/dmg-acid2.gb --seconds 1 --dump-frame /tmp/deitygb-frame.ppm
+nix develop --command cargo run --release --bin gb-headless -- src/roms/dmg-acid2.gb --seconds 8 --no-apu --dump-frame /tmp/dmg-acid2.ppm
+nix develop --command cargo run --release --bin gb-headless -- src/roms/cgb-acid2.gbc --seconds 8 --no-apu --dump-frame /tmp/cgb-acid2.ppm
 ```
 
 The snapshot is a raw PPM image at the original DMG resolution, 160x144.
+Both Acid2 images have exact framebuffer regressions:
+
+```sh
+nix develop --command cargo test --release --test headless dmg_acid2_matches_reference_layout -- --ignored --exact
+nix develop --command cargo test --release --test headless cgb_acid2_matches_reference_image -- --ignored --exact
+```
+
+The CGB output matches the official RGB reference pixel-for-pixel. The DMG
+output matches every official shade index; DeityGB deliberately presents those
+four indices through its green LCD palette instead of grayscale.
 
 For game debugging where sound behavior is not under test, add `--no-apu`.
 Script a Start-button pulse with `--press-start-at N`, where `N` is an

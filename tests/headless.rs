@@ -365,6 +365,36 @@ fn mbc3_rtc_ticks_halts_and_latches() {
 }
 
 #[test]
+#[ignore = "runs the local DMG Acid2 ROM and checks the complete reference image"]
+fn dmg_acid2_matches_reference_layout() {
+    let rom = load_file(&repo_path("src/roms/dmg-acid2.gb")).unwrap();
+    let boot = load_file(&default_boot_rom_path()).unwrap();
+    let mut gb = GameBoy::new();
+    gb.set_apu_enabled(false);
+    gb.load_boot_rom(&boot);
+    gb.load_rom(&rom);
+
+    gb.run_for_cycles(DMG_CPU_FREQUENCY * 8);
+
+    assert_eq!(fnv1a(&gb.framebuffer_rgba()), 0x04ae_9fcd_4a05_02fd);
+}
+
+#[test]
+#[ignore = "runs the local CGB Acid2 ROM and checks the complete reference image"]
+fn cgb_acid2_matches_reference_image() {
+    let rom = load_file(&repo_path("src/roms/cgb-acid2.gbc")).unwrap();
+    let boot = load_file(&default_boot_rom_path()).unwrap();
+    let mut gb = GameBoy::new();
+    gb.set_apu_enabled(false);
+    gb.load_boot_rom(&boot);
+    gb.load_rom(&rom);
+
+    gb.run_for_cycles(DMG_CPU_FREQUENCY * 8);
+
+    assert_eq!(fnv1a(&gb.framebuffer_rgba()), 0x71a4_a863_fe5b_cde0);
+}
+
+#[test]
 #[ignore = "runs the local Pokemon Red ROM for a deterministic title-to-menu smoke test"]
 fn pokemon_red_reaches_new_game_menu() {
     let rom = load_file(&repo_path("src/roms/pokemon_red.gb")).unwrap();

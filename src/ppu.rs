@@ -654,7 +654,6 @@ impl PPU {
         let lcdc = self.get_lcdc(mmu_ref);
         let window_enabled = lcdc & 0x20 != 0 && (mmu_ref.cgb_mode() || lcdc & 0x01 != 0);
         if !window_enabled {
-            self.window_line_counter = 0;
             return;
         }
 
