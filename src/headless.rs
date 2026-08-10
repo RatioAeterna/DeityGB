@@ -35,7 +35,7 @@ pub struct GameBoy {
     pub mmu: MMU,
     pub ppu: PPU,
     pub apu: APU,
-    _audio_receiver: mpsc::Receiver<f32>,
+    _audio_receiver: mpsc::Receiver<(f32, f32)>,
     apu_enabled: bool,
     frames: u64,
     cycles: u64,
@@ -44,7 +44,7 @@ pub struct GameBoy {
 
 impl GameBoy {
     pub fn new() -> Self {
-        let (sender, receiver) = mpsc::channel::<f32>();
+        let (sender, receiver) = mpsc::channel::<(f32, f32)>();
         Self {
             cpu: CPU::new(),
             mmu: MMU::new(),
@@ -110,6 +110,9 @@ impl GameBoy {
             if serial_contains_ascii(serial, "Failed") {
                 return self.report(TestOutcome::Failed);
             }
+            if let Some(outcome) = self.blargg_memory_outcome() {
+                return self.report(outcome);
+            }
         }
 
         self.report(TestOutcome::Timeout)
@@ -139,6 +142,30 @@ impl GameBoy {
 
     pub fn framebuffer_rgba(&mut self) -> Vec<u8> {
         self.ppu.get_rgba_buffer().to_vec()
+    }
+
+    pub fn blargg_memory_text(&self) -> Option<String> {
+        if [self.mmu.get_byte(0xA001), self.mmu.get_byte(0xA002), self.mmu.get_byte(0xA003)]
+            != [0xDE, 0xB0, 0x61]
+        {
+            return None;
+        }
+        let bytes = (0xA004..0xC000)
+            .map(|addr| self.mmu.get_byte(addr))
+            .take_while(|byte| *byte != 0)
+            .collect::<Vec<_>>();
+        Some(String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    fn blargg_memory_outcome(&self) -> Option<TestOutcome> {
+        if self.blargg_memory_text()?.is_empty() {
+            return None;
+        }
+        match self.mmu.get_byte(0xA000) {
+            0x80 => None,
+            0 => Some(TestOutcome::Passed),
+            _ => Some(TestOutcome::Failed),
+        }
     }
 
     fn report(&self, outcome: TestOutcome) -> RunReport {

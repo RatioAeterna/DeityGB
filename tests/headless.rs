@@ -1,8 +1,10 @@
+use deitygb::apu::APU;
 use deitygb::cpu::CPU;
 use deitygb::headless::{default_boot_rom_path, load_file, GameBoy, TestOutcome, DMG_CPU_FREQUENCY};
 use deitygb::mmu::{JoypadButton, MMU};
 use deitygb::ppu::{PPU, Sprite};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 
 fn repo_path(path: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(path)
@@ -36,6 +38,38 @@ fn serial_transfer_records_internal_clock_byte() {
 fn headless_framebuffer_is_rgba_sized() {
     let mut gb = GameBoy::new();
     assert_eq!(gb.framebuffer_rgba().len(), 160 * 144 * 4);
+}
+
+#[test]
+fn headless_decodes_blargg_memory_protocol() {
+    let mut gb = GameBoy::new();
+    gb.mmu.set_raw_byte(0xA000, 0);
+    gb.mmu.set_raw_byte(0xA001, 0xDE);
+    gb.mmu.set_raw_byte(0xA002, 0xB0);
+    gb.mmu.set_raw_byte(0xA003, 0x61);
+    for (offset, byte) in b"Passed\0".iter().enumerate() {
+        gb.mmu.set_raw_byte(0xA004 + offset, *byte);
+    }
+
+    assert_eq!(gb.blargg_memory_text().as_deref(), Some("Passed"));
+}
+
+#[test]
+fn apu_trigger_and_dac_control_channel_status() {
+    let (sender, _receiver) = mpsc::channel();
+    let mut apu = APU::new(sender);
+    let mut mmu = MMU::new();
+    mmu.set_byte(0xFF26, 0x80);
+    mmu.set_byte(0xFF11, 0x80);
+    mmu.set_byte(0xFF12, 0xF0);
+    mmu.set_byte(0xFF13, 0xFF);
+    mmu.set_byte(0xFF14, 0x87);
+    apu.cycle(4, &mut mmu);
+    assert_ne!(mmu.get_byte(0xFF26) & 1, 0);
+
+    mmu.set_byte(0xFF12, 0);
+    apu.cycle(4, &mut mmu);
+    assert_eq!(mmu.get_byte(0xFF26) & 1, 0);
 }
 
 #[test]
@@ -384,4 +418,44 @@ fn mooneye_daa_reports_pass_or_fail() {
 
     let report = gb.run_until(DMG_CPU_FREQUENCY * 30);
     assert_ne!(report.outcome, TestOutcome::Timeout, "serial: {:?}", report.serial);
+}
+
+#[test]
+#[ignore = "runs the bundled Blargg DMG/CGB sound core ROMs"]
+fn blargg_sound_core_roms_pass() {
+    let cases = [
+        ("dmg_sound", "01-registers.gb"),
+        ("dmg_sound", "02-len ctr.gb"),
+        ("dmg_sound", "03-trigger.gb"),
+        ("dmg_sound", "04-sweep.gb"),
+        ("dmg_sound", "05-sweep details.gb"),
+        ("dmg_sound", "06-overflow on trigger.gb"),
+        ("dmg_sound", "11-regs after power.gb"),
+        ("cgb_sound", "01-registers.gb"),
+        ("cgb_sound", "02-len ctr.gb"),
+        ("cgb_sound", "03-trigger.gb"),
+        ("cgb_sound", "04-sweep.gb"),
+        ("cgb_sound", "05-sweep details.gb"),
+        ("cgb_sound", "06-overflow on trigger.gb"),
+        ("cgb_sound", "10-wave trigger while on.gb"),
+        ("cgb_sound", "11-regs after power.gb"),
+        ("cgb_sound", "12-wave.gb"),
+    ];
+    let boot = load_file(&default_boot_rom_path()).unwrap();
+    for (suite, name) in cases {
+        let rom = load_file(&repo_path(&format!(
+            "src/roms/gb-test-roms/{suite}/rom_singles/{name}"
+        )))
+        .unwrap();
+        let mut gb = GameBoy::new();
+        gb.load_boot_rom(&boot);
+        gb.load_rom(&rom);
+        let report = gb.run_until(DMG_CPU_FREQUENCY * 30);
+        assert_eq!(
+            report.outcome,
+            TestOutcome::Passed,
+            "{suite}/{name}: {:?}",
+            gb.blargg_memory_text()
+        );
+    }
 }

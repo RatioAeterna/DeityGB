@@ -16,6 +16,12 @@ nix develop --command cargo run --release --bin DeityGB -- src/roms/pokemon_red.
 nix develop --command cargo run --release --bin DeityGB -- src/roms/pokemon_silver.gbc
 ```
 
+Append `--apu` to enable host audio:
+
+```sh
+nix develop --command cargo run --release --bin DeityGB -- src/roms/pokemon_silver.gbc --apu
+```
+
 Controls are WASD for the D-pad, J/K for A/B, Enter for Start, and Left Shift
 for Select.
 
@@ -31,8 +37,9 @@ nix develop --command cargo run --bin gb-headless -- src/roms/mts-20240926-1737-
 ```
 
 The headless runner reports `Passed`, `Failed`, or `Timeout` by watching serial
-output. Blargg ROMs commonly print ASCII status text such as `Passed` or
-`Failed`. Mooneye ROMs use their documented serial/register protocol: passing
+output and Blargg's documented cartridge-RAM protocol at `A000-A004`. The
+runner prints the memory status and escaped diagnostic text when that protocol
+is present. Mooneye ROMs use their documented serial/register protocol: passing
 tests send `3, 5, 8, 13, 21, 34`; failing tests send `0x42` six times.
 
 ## Visual Snapshots
@@ -94,10 +101,27 @@ nix develop --command cargo test --test headless -- --ignored --test-threads=1
 They are ignored by default because the current emulator may expose accuracy
 gaps while CPU, timer, PPU, and APU work is still in progress.
 
+Run the passing DMG/CGB APU core set directly with:
+
+```sh
+nix develop --command cargo test --release --test headless blargg_sound_core_roms_pass -- --ignored --exact
+```
+
+The current sound baseline is 7/12 DMG and 9/12 CGB. Both suites pass register
+behavior, length counters, fifth-register trigger timing, sweep, sweep details,
+sweep overflow, and post-power register behavior. CGB additionally passes wave
+retrigger and the dedicated wave timer/phase/access test. Remaining failures
+cover frame-sequencer phase across APU power, length persistence across power,
+and cycle-window behavior for active wave RAM; these are narrower timing gaps,
+not missing pulse, wave, or noise synthesis.
+
 ## References
 
 - Pan Docs: memory map, boot ROM handoff, and serial `FF01`/`FF02` behavior.
   <https://gbdev.io/pandocs/>
+- Pan Docs audio registers and timing details.
+  <https://gbdev.io/pandocs/Audio_Registers.html>
+  <https://gbdev.io/pandocs/Audio_details.html>
 - Mooneye Test Suite README and pass/fail protocol.
   <https://github.com/Gekkio/mooneye-test-suite>
 - Bundled Blargg README:

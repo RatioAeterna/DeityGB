@@ -371,3 +371,232 @@ No implementation code was searched for or copied from another emulator.
 - Palette access blocking during mode 3, infrared behavior, and CGB-specific
   audio differences are not cycle-accurate. The APU remains a separate project.
 - RTC state and cartridge RAM are not yet persisted to disk.
+
+## APU Implementation
+
+The old APU was a partial channel-1 prototype: it used floating-point phase for
+one square wave, returned silence for channels 2-4, reloaded length on every
+trigger, and did not implement sweep, envelopes, wave playback, noise, routing,
+or hardware-rate sample output. The APU was rebuilt from the project's existing
+register bus using Pan Docs and the bundled Blargg sound documentation/source as
+the hardware oracle. No emulator implementation was searched for or copied.
+
+### Mental Model and Ownership
+
+The implementation treats the APU as four small digital machines sharing a
+slow control clock, rather than as four mathematical oscillators. This matters:
+Game Boy software can observe channel status, length expiration, sweep overflow,
+and wave RAM contention even when the output volume is zero. Producing a tone
+that sounds approximately right is therefore only the final stage of emulation.
+
+The responsibilities are divided as follows:
+
+- `MMU` owns the software-visible audio registers at `FF10-FF3F`. It applies
+  read masks, rejects writes while sound is powered down, records edge-sensitive
+  writes, exposes `NR52` channel status, and detects DIV-APU falling edges.
+- `APU` owns hidden hardware state that software cannot read directly: frequency
+  countdowns, duty positions, length counters, envelope timers, sweep shadow
+  frequency, wave position/sample buffer, and the noise LFSR.
+- A CPU instruction writes registers through the MMU. At the next APU step,
+  write flags transfer the relevant register event into hidden channel state.
+  This distinction prevents a trigger bit from behaving like persistent memory.
+- Channel timers advance in the base 4.194304 MHz domain. The frame sequencer
+  advances only on the selected divider falling edge, and host samples are
+  emitted by a separate fractional-rate accumulator. None of those clocks is
+  derived from wall-clock time.
+
+One useful way to read the resulting signal path is:
+
+```text
+CPU register write
+  -> MMU masks and records the event
+  -> APU updates hidden channel state
+  -> frequency timer advances waveform position
+  -> envelope/length/sweep frame clocks modify that state
+  -> channel emits a 4-bit digital sample
+  -> DAC conversion and NR51 routing
+  -> NR50 terminal volume and high-pass filter
+  -> host-rate stereo sample
+```
+
+This separation is also why headless tests can validate the APU without opening
+an audio device: the hardware state machines run identically and generated
+samples are simply drained from an in-memory channel.
+
+### Hardware State Machines
+
+- Replaced floating phases with explicit pulse frequency timers and eight-step
+  duty sequencers for channels 1 and 2.
+- Added independent 64-tick pulse/noise length counters and the wave channel's
+  256-tick length counter. Length writes reload counters without re-enabling a
+  channel; triggers preserve a nonzero length and reload only a zero counter.
+- Implemented the fifth-register length-enable edge behavior, including the
+  extra length clock in the appropriate half of the frame-sequencer period.
+- Added DAC gating for all channels. Clearing `NR12`, `NR22`, `NR30`, or `NR42`
+  now disables the channel immediately, while enabling a DAC does not implicitly
+  enable its channel.
+- Added the 512 Hz DIV-APU frame sequencer: length clocks at 256 Hz, channel-1
+  sweep at 128 Hz, and volume envelopes at 64 Hz. CGB double-speed mode watches
+  internal DIV bit 13 rather than bit 12 so audio remains in the base-speed
+  domain.
+- Implemented channel-1 sweep shadow frequency, timer reload, add/subtract,
+  trigger-time overflow check, post-update overflow check, private frequency
+  copy, and the negate-to-add disable quirk.
+- Implemented pulse/noise volume envelopes, including period-zero-as-eight and
+  stopping at volume 0/15 without disabling the channel.
+- Implemented the 32-sample wave sequencer, 16-byte wave RAM nibble selection,
+  output-level shifts, 11-bit frequency timer, trigger phase/timer reset, and
+  CGB active-byte wave RAM aliasing.
+- Implemented the noise channel's divisor/shift timer, 15-bit LFSR, and seven-bit
+  width mode.
+
+### Register Writes, Power, and Triggering
+
+- `NR52` bit 7 is the APU power switch; its low four bits are generated channel
+  status, not ordinary writable memory. Powering down disables all channels and
+  clears ordinary sound registers while preserving wave RAM. CGB and DMG length
+  behavior during power transitions remains explicitly separated.
+- Each `NRx4` trigger bit is write-only and event-like. The MMU remembers both
+  that a write occurred and the previous length-enable value, allowing the APU
+  to distinguish a trigger from an ordinary frequency-high write and to detect
+  the documented disabled-to-enabled length transition.
+- Triggering initializes the channel's timer/envelope/sweep machinery and may
+  enable the channel only if its DAC is enabled. It does not blindly reload a
+  nonzero length counter. If length is zero, trigger reloads the channel maximum
+  and applies the extra length clock only in the applicable sequencer half.
+- Writes to DAC-control registers are consumed before channel status is exposed.
+  This makes DAC disable immediate, as observed by the Blargg tests, while DAC
+  enable alone never resurrects an expired channel.
+- On DMG hardware, length fields remain writable while the APU is off. Only the
+  actual length bits are retained for pulse/noise registers; duty bits do not
+  become writable merely because they share the same byte.
+
+### Channel-by-Channel Behavior
+
+- **Pulse 1:** an 11-bit frequency selects a timer period. Timer expiration
+  advances one of four eight-step duty patterns. Its envelope supplies the
+  current 4-bit amplitude. The sweep unit keeps a private trigger-time frequency
+  copy, performs add/subtract calculations at 128 Hz, writes successful updates
+  back to the frequency registers, and disables on overflow.
+- **Pulse 2:** uses the same duty, frequency, length, DAC, and envelope machinery
+  without sweep. Sharing a channel structure removes duplicated timing behavior
+  while leaving pulse 1's sweep state independent.
+- **Wave:** a 32-position sequencer consumes the high and low nibbles of 16-byte
+  wave RAM. `NR32` selects mute, full, half, or quarter level by shifting the
+  current 4-bit sample. The length maximum is 256 rather than 64. CGB active
+  accesses alias the currently fetched wave byte, which is why reads from
+  different wave addresses can return the same value while playback is active.
+- **Noise:** timer expiration shifts a 15-bit LFSR whose XOR feedback creates
+  pseudo-random output. Width mode additionally copies feedback into bit 6,
+  producing the shorter repeating pattern used by many percussion effects.
+  The resulting low bit gates the envelope's 4-bit amplitude.
+
+The frame sequencer is intentionally orthogonal to waveform timers. Pulse duty,
+wave position, and noise LFSR may advance thousands of times between envelope
+changes; length, sweep, and envelope clocks occur only at 256, 128, and 64 Hz.
+
+### Mixing and Frontend Output
+
+- Each channel now produces its documented four-bit digital output. `NR51`
+  routes channels to left/right, `NR50` applies terminal volume, and DAC output
+  is centered before separate stereo terminal samples pass through a DC-blocking
+  high-pass stage. Disabled channels contribute silence rather than DAC code 0.
+- CGB `PCM12` and `PCM34` expose the live pre-mixer digital channel values.
+- Sample timing now uses a fractional CPU-clock accumulator rather than a fixed
+  91-cycle approximation, and macroquad passes the actual host output sample
+  rate into the APU.
+- The cpal callback now consumes one stereo emulator sample per host audio frame
+  and maps it to the device's left/right channels. Previously it consumed a new
+  mono sample for every interleaved speaker slot, halving playback speed on
+  stereo devices.
+- Host audio remains opt-in through `--apu`; headless emulation continues to run
+  and drain the APU without needing an audio device.
+
+The mixer does not average all four channels before routing. Each enabled
+channel first becomes an analog-like DAC value, then `NR51` independently sends
+it to the left terminal, right terminal, both, or neither. `NR50` scales the two
+terminal sums separately. A disabled channel contributes true silence; this is
+different from an enabled channel whose current digital sample is zero, because
+DAC code zero is still an electrical level. The high-pass state removes that DC
+component over time and is reset when the APU powers down.
+
+The host sample accumulator adds `t_cycles * host_sample_rate` and emits while
+the result exceeds 4,194,304. This preserves fractional timing at common rates
+such as 44.1 and 48 kHz without periodically drifting or hard-coding a rounded
+cycles-per-sample value. The cpal callback consumes one `(left, right)` pair per
+host frame; mono devices receive the average and devices with extra channels
+receive the stereo pair plus an averaged fill for remaining channels.
+
+### Verification Harness and Results
+
+- Added Blargg's cartridge-RAM result protocol to the headless runner: signature
+  `DE B0 61` at `A001-A003`, status at `A000`, and zero-terminated diagnostics at
+  `A004`. Detection waits for nonempty text to avoid falsely accepting the brief
+  zero-status interval while a ROM initializes its report buffer.
+- Added command-line reporting of Blargg memory status and diagnostics, a fast
+  protocol decoding test, and a fast trigger/DAC channel-status test.
+- Added an ignored aggregate regression for all currently passing sound ROMs.
+- Baseline before the rewrite was 1/12 DMG and 1/12 CGB. The current result is
+  7/12 DMG and 9/12 CGB, with all former sweep timeouts eliminated.
+- Passing in both modes: registers, length counters, trigger timing, sweep,
+  sweep details, trigger overflow, and registers after power. CGB also passes
+  wave retrigger and its dedicated wave timer/phase/access test.
+- All active Rust regressions pass. Remaining Blargg failures are sequencer phase
+  across APU power, length persistence across APU power, and DMG/CGB active wave
+  RAM cycle windows. Those require finer memory-access timing than the current
+  instruction-batched APU boundary exposes and are documented rather than hidden.
+
+The improvement was measured incrementally rather than inferred from audible
+output. The corrected initial baseline exposed a false-positive hazard in the
+Blargg memory protocol: the suite writes its signature before changing status
+from zero to `80`. Accepting zero immediately therefore reported a blank test as
+passed. Requiring nonempty diagnostic text removed that race and produced the
+real 1/12 plus 1/12 baseline.
+
+The first state-machine pass immediately converted sweep tests from timeouts to
+specific assertions and made overflow-on-trigger pass. Subsequent fixes were
+then driven by exact diagnostics: triggers had been incorrectly reloading every
+length counter; extra clocks depended on the current sequencer half; changing
+sweep from subtract to add needed the hidden `negate_used` state; and powered-off
+DMG writes needed field-level masking. This progression is preserved in the
+final architecture rather than special-casing individual test ROMs.
+
+The remaining wave access failures illustrate the current timing boundary. CPU
+instructions execute their memory access before DeityGB advances the APU for the
+instruction's aggregate cycle count. Real DMG wave RAM is available only during
+a very narrow interval around the channel's own byte fetch. Correctly deciding
+whether a CPU read landed inside that interval ultimately requires interleaving
+bus accesses and APU timer advancement more finely than one post-instruction
+call. The implementation keeps the broad hardware behavior and documents that
+architectural limitation instead of adding ROM-specific timing guesses.
+
+### Reproduction Commands
+
+Fast active tests:
+
+```sh
+nix develop --command cargo test --release --lib --tests
+```
+
+The 16-ROM passing sound checkpoint:
+
+```sh
+nix develop --command cargo test --release --test headless \
+  blargg_sound_core_roms_pass -- --ignored --exact
+```
+
+Interactive CGB gameplay with audio:
+
+```sh
+nix develop --command cargo run --release --bin DeityGB -- \
+  src/roms/pokemon_silver.gbc --apu
+```
+
+For debugging individual remaining cases, the headless binary prints both the
+outcome and Blargg's escaped memory report:
+
+```sh
+nix develop --command cargo run --release --bin gb-headless -- \
+  "src/roms/gb-test-roms/dmg_sound/rom_singles/09-wave read while on.gb" \
+  --seconds 30
+```

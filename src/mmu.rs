@@ -117,6 +117,8 @@ pub struct MMU {
         pub nr22_written : bool,
         pub nr30_written : bool,
         pub nr42_written : bool,
+        pub nr10_written : bool,
+        pub nr10_old : u8,
 
         // trigger registers (we only trigger on WRITES to these
         // when the trigger bit is set)
@@ -124,8 +126,16 @@ pub struct MMU {
         pub nr24_written : bool,
         pub nr34_written : bool,
         pub nr44_written : bool,
+        pub nr14_old : u8,
+        pub nr24_old : u8,
+        pub nr34_old : u8,
+        pub nr44_old : u8,
 
         pub div_apu_increment_flag : bool,
+        pub wave_channel_active : bool,
+        pub wave_ram_index : u8,
+        pub pcm12 : u8,
+        pub pcm34 : u8,
 
         serial_output : Vec<u8>,
 }
@@ -198,13 +208,23 @@ impl MMU {
             nr22_written : false,
             nr30_written : false,
             nr42_written : false,
+            nr10_written : false,
+            nr10_old : 0,
 
             nr14_written : false,
             nr24_written : false,
             nr34_written : false,
             nr44_written : false,
+            nr14_old : 0,
+            nr24_old : 0,
+            nr34_old : 0,
+            nr44_old : 0,
 
             div_apu_increment_flag : false,
+            wave_channel_active : false,
+            wave_ram_index : 0,
+            pcm12 : 0,
+            pcm34 : 0,
             serial_output : Vec::new(),
         }
     }
@@ -333,13 +353,23 @@ impl MMU {
     }
 
     pub fn apu_reg_set(&mut self, addr : usize, data : u8) {
+        if self.cgb_mode && self.wave_channel_active && (0xFF30..=0xFF3F).contains(&addr) {
+            self.memory[0xFF30 + usize::from(self.wave_ram_index)] = data;
+            return;
+        }
         // first, check if APU is enabled. Ignore write if not.
         let enabled = (self.get_byte(0xFF26 as usize) & 0b10000000) != 0;
-        if !enabled && (addr != 0xFF26) && (addr < 0xFF30) {
+        let dmg_length_write = !self.cgb_mode && matches!(addr, 0xFF11 | 0xFF16 | 0xFF1B | 0xFF20);
+        if !enabled && (addr != 0xFF26) && (addr < 0xFF30) && !dmg_length_write {
             return; // if we're not writing to wave RAM
         }
         
         let set_val = match addr {
+            0xFF10 => {
+                self.nr10_old = self.memory[addr];
+                self.nr10_written = true;
+                data
+            },
             0xFF26 => { // NR52
                 let master_enable = data & 0x80; // only writeable bit
                 let current_status = self.memory[addr] & 0x0F; // keep channel status bits
@@ -379,27 +409,41 @@ impl MMU {
                 data
             },
             0xFF14 => {
+                self.nr14_old = self.memory[addr];
                 self.nr14_written = true;
                 data
             },
             0xFF19 => {
+                self.nr24_old = self.memory[addr];
                 self.nr24_written = true;
                 data
             },
             0xFF1E => {
+                self.nr34_old = self.memory[addr];
                 self.nr34_written = true;
                 data
             },
             0xFF23 => {
+                self.nr44_old = self.memory[addr];
                 self.nr44_written = true;
                 data
             },
             _ => data,
         };
-        self.memory[addr] = set_val;
+        self.memory[addr] = if !enabled && !self.cgb_mode {
+            match addr {
+                0xFF11 | 0xFF16 | 0xFF20 => set_val & 0x3F,
+                _ => set_val,
+            }
+        } else {
+            set_val
+        };
     }
 
     pub fn apu_reg_get(&self, addr : usize) -> u8 {
+        if self.cgb_mode && self.wave_channel_active && (0xFF30..=0xFF3F).contains(&addr) {
+            return self.memory[0xFF30 + usize::from(self.wave_ram_index)];
+        }
         match addr {
             0xFF10 => self.memory[addr] | 0x80,
             0xFF11 => self.memory[addr] | 0x3F,
@@ -685,7 +729,7 @@ impl MMU {
         self.memory[addr] = data;        
     }
 
-    pub fn get_raw_byte(&mut self, mut addr: usize) -> u8 {
+    pub fn get_raw_byte(&self, mut addr: usize) -> u8 {
         return self.memory[addr];
     }
 
@@ -929,8 +973,8 @@ impl MMU {
         if addr == 0xFF04 { // DIV write resets it
             // DIV-APU increment, if any
             let old_val = self.div_internal;
-            let actual_old_val = old_val >> 8;
-            if (actual_old_val & 0b00010000) != 0 {
+            let apu_bit = if self.double_speed { 13 } else { 12 };
+            if old_val & (1 << apu_bit) != 0 {
                 self.div_apu_increment_flag = true;
             }
             self.div_internal = 0;
@@ -946,10 +990,8 @@ impl MMU {
         //
         //println!("DIV INTERNAL: {} aka {:016b}, cycles: {}", self.div_internal, self.div_internal, cycles);
         // DIV-APU increment, if any
-        let actual_old_div = old_val >> 8;
-        let actual_new_div = self.div_internal >> 8;
-
-        if ((actual_old_div & 0b00010000) != 0) && ((actual_new_div & 0b00010000) == 0) {
+        let apu_bit = if self.double_speed { 13 } else { 12 };
+        if old_val & (1 << apu_bit) != 0 && self.div_internal & (1 << apu_bit) == 0 {
             self.div_apu_increment_flag = true;
         }
     }
@@ -1033,7 +1075,8 @@ impl MMU {
                 0xFF6B => return self.obj_palette_data[(self.obj_palette_index & 0x3F) as usize],
                 0xFF6C => return 0xFE | (self.memory[addr] & 0x01),
                 0xFF70 => return 0xF8 | self.wram_bank,
-                0xFF76 | 0xFF77 => return 0x00,
+                0xFF76 => return self.pcm12,
+                0xFF77 => return self.pcm34,
                 _ => {}
             }
         }

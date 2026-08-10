@@ -96,23 +96,30 @@ pub struct SimpleAudio {
 }
 
 impl SimpleAudio {
-    pub fn new() -> (Self, mpsc::Sender<f32>) {
+    pub fn new() -> (Self, mpsc::Sender<(f32, f32)>, u32) {
         let host = cpal::default_host();
         let device = host.default_output_device().unwrap();
         let config = device.default_output_config().unwrap();
+        let sample_rate = config.sample_rate().0;
+        let channels = usize::from(config.channels());
 
         // Create a channel for sending samples from APU to audio thread
-        let (sample_sender, sample_receiver) = mpsc::channel::<f32>();
+        let (sample_sender, sample_receiver) = mpsc::channel::<(f32, f32)>();
 
         let stream = device
             .build_output_stream(
                 &config.into(),
                 move |data: &mut [f32], _| {
-                    for sample in data.iter_mut() {
-                        // Try to get a sample from the APU
-                        match sample_receiver.try_recv() {
-                            Ok(apu_sample) => *sample = apu_sample,
-                            Err(_) => *sample = 0.0, // No sample available = silence
+                    for frame in data.chunks_mut(channels) {
+                        let (left, right) = sample_receiver.try_recv().unwrap_or((0.0, 0.0));
+                        if frame.len() == 1 {
+                            frame[0] = (left + right) * 0.5;
+                        } else {
+                            frame[0] = left;
+                            frame[1] = right;
+                            for sample in &mut frame[2..] {
+                                *sample = (left + right) * 0.5;
+                            }
                         }
                     }
                 },
@@ -123,7 +130,7 @@ impl SimpleAudio {
 
         stream.play().unwrap();
 
-        (Self { _stream: stream }, sample_sender)
+        (Self { _stream: stream }, sample_sender, sample_rate)
     }
 }
 
@@ -151,18 +158,18 @@ async fn main() {
     set_macos_application_icon();
     show_startup_splash().await;
 
-    let (_audio, sender, _silent_receiver) = if apu_enabled {
-        let (audio, sender) = SimpleAudio::new();
-        (Some(audio), sender, None)
+    let (_audio, sender, sample_rate, _silent_receiver) = if apu_enabled {
+        let (audio, sender, sample_rate) = SimpleAudio::new();
+        (Some(audio), sender, sample_rate, None)
     } else {
         let (sender, receiver) = mpsc::channel();
-        (None, sender, Some(receiver))
+        (None, sender, 48_000, Some(receiver))
     };
 
     let mut mmu = mmu::MMU::new();
     let mut cpu = cpu::CPU::new();
     let mut ppu = ppu::PPU::new();
-    let mut apu = apu::APU::new(sender);
+    let mut apu = apu::APU::with_sample_rate(sender, sample_rate);
 
     /*
     let path = Path::new(&args[1]);

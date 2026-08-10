@@ -112,6 +112,10 @@ fn main() {
     println!("cycles: {}", report.cycles);
     println!("frames: {}", report.frames);
     println!("serial: {}", serial_text.escape_default());
+    if let Some(text) = gb.blargg_memory_text() {
+        println!("blargg-memory-status: {:#04x}", gb.mmu.get_byte(0xA000));
+        println!("blargg-memory: {}", text.escape_default());
+    }
     let pc = gb.cpu.program_counter();
     println!(
         "state: bank={:#04x} pc={:#06x} sp={:#06x} hl={:#06x} de={:#06x} halted={} ime={} lcdc={:#04x} stat={:#04x} ly={} lyc={} ie={:#04x} if={:#04x} div={:#06x} tima={:#04x} tma={:#04x} tac={:#04x} joyp={:#04x} ff8b={:#04x} ff8c={:#04x} ff8e={:#04x} ff94={:#04x} d03b={:#04x} bgp={:#04x} scx={} scy={}",

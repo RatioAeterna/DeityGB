@@ -1,457 +1,618 @@
+use crate::mmu::MMU;
 use std::sync::mpsc;
-use crate::mmu as mmu;
 
+const CPU_HZ: u32 = 4_194_304;
+const DUTY_TABLE: [[u8; 8]; 4] = [
+    [0, 0, 0, 0, 0, 0, 0, 1],
+    [1, 0, 0, 0, 0, 0, 0, 1],
+    [1, 0, 0, 0, 0, 1, 1, 1],
+    [0, 1, 1, 1, 1, 1, 1, 0],
+];
+
+#[derive(Clone, Default)]
+struct Envelope {
+    volume: u8,
+    timer: u8,
+    period: u8,
+    increase: bool,
+    running: bool,
+}
+
+impl Envelope {
+    fn trigger(&mut self, register: u8) {
+        self.volume = register >> 4;
+        self.period = register & 7;
+        self.timer = if self.period == 0 { 8 } else { self.period };
+        self.increase = register & 8 != 0;
+        self.running = true;
+    }
+
+    fn clock(&mut self) {
+        if !self.running {
+            return;
+        }
+        self.timer -= 1;
+        if self.timer != 0 {
+            return;
+        }
+        self.timer = if self.period == 0 { 8 } else { self.period };
+        let next = if self.increase {
+            self.volume.checked_add(1).filter(|volume| *volume <= 15)
+        } else {
+            self.volume.checked_sub(1)
+        };
+        if let Some(volume) = next {
+            self.volume = volume;
+        } else {
+            self.running = false;
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+struct PulseChannel {
+    enabled: bool,
+    length: u16,
+    timer: i32,
+    duty_step: u8,
+    envelope: Envelope,
+}
+
+impl PulseChannel {
+    fn clock_timer(&mut self, cycles: i32, frequency: u16) {
+        self.timer -= cycles;
+        let period = i32::from((2048 - frequency) * 4);
+        while self.timer <= 0 {
+            self.timer += period;
+            self.duty_step = (self.duty_step + 1) & 7;
+        }
+    }
+
+    fn output(&self, duty: u8) -> u8 {
+        if self.enabled && DUTY_TABLE[duty as usize][self.duty_step as usize] != 0 {
+            self.envelope.volume
+        } else {
+            0
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+struct WaveChannel {
+    enabled: bool,
+    length: u16,
+    timer: i32,
+    position: u8,
+    sample: u8,
+}
+
+#[derive(Clone)]
+struct NoiseChannel {
+    enabled: bool,
+    length: u16,
+    timer: i32,
+    lfsr: u16,
+    envelope: Envelope,
+}
+
+impl Default for NoiseChannel {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            length: 0,
+            timer: 0,
+            lfsr: 0x7fff,
+            envelope: Envelope::default(),
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+struct Sweep {
+    shadow_frequency: u16,
+    timer: u8,
+    enabled: bool,
+    negate_used: bool,
+}
 
 #[derive(Clone)]
 pub struct APU {
-    pub audio_sender: mpsc::Sender<f32>,
-    pub accumulated_cycles : u16,
-
-    pub square1_phase : f32,
-    pub square2_phase : f32,
-    pub wave_phase : f32,
-    pub noise_phase : f32,
-
-    pub master_audio_enabled : bool,
-
-    pub square1_length_counter : u8,
-    pub square2_length_counter : u8,
-    pub wave_length_counter : u8,
-    pub noise_length_counter : u8,
-
-    pub step : u8,
+    pub audio_sender: mpsc::Sender<(f32, f32)>,
+    pulse1: PulseChannel,
+    pulse2: PulseChannel,
+    wave: WaveChannel,
+    noise: NoiseChannel,
+    sweep: Sweep,
+    frame_step: u8,
+    sample_clock: u32,
+    sample_rate: u32,
+    powered: bool,
+    left_capacitor: f32,
+    right_capacitor: f32,
 }
 
 impl APU {
+    pub fn new(sender: mpsc::Sender<(f32, f32)>) -> Self {
+        Self::with_sample_rate(sender, 48_000)
+    }
 
-
-    pub fn new(sender : mpsc::Sender<f32>) -> APU {
-        APU {
-            audio_sender : sender,
-            accumulated_cycles : 0,
-            square1_phase : 0.0,
-            square2_phase : 0.0,
-            wave_phase : 0.0,
-            noise_phase : 0.0,
-            master_audio_enabled : true,
-
-            square1_length_counter: 0,
-            square2_length_counter: 0,
-            wave_length_counter: 0,
-            noise_length_counter: 0,
-
-            step : 0,
+    pub fn with_sample_rate(sender: mpsc::Sender<(f32, f32)>, sample_rate: u32) -> Self {
+        Self {
+            audio_sender: sender,
+            pulse1: PulseChannel::default(),
+            pulse2: PulseChannel::default(),
+            wave: WaveChannel::default(),
+            noise: NoiseChannel::default(),
+            sweep: Sweep::default(),
+            frame_step: 0,
+            sample_clock: 0,
+            sample_rate,
+            powered: true,
+            left_capacitor: 0.0,
+            right_capacitor: 0.0,
         }
     }
 
-
-    fn update_length_counters(&mut self, mmu: &mut mmu::MMU) {
-        if self.square1_length_counter > 0 {
-            let nr14 = mmu.get_raw_byte(0xFF14);
-            let length_enabled = (nr14 & 0x40) != 0;  // Bit 6 enables length
-            
-            if length_enabled {
-                self.square1_length_counter -= 1;
-                if self.square1_length_counter == 0 {
-                    self.disable_channel(1, mmu);
-                }
-            }
-        }
-        
-        if self.square2_length_counter > 0 {
-            let nr24 = mmu.get_raw_byte(0xFF19);  // NR24
-            let length_enabled = (nr24 & 0x40) != 0;
-            
-            if length_enabled {
-                self.square2_length_counter -= 1;
-                if self.square2_length_counter == 0 {
-                    self.disable_channel(2, mmu);
-                }
-            }
-        }
-
-        if self.wave_length_counter > 0 {
-            let nr34 = mmu.get_raw_byte(0xFF1E);  // NR34
-            let length_enabled = (nr34 & 0x40) != 0;
-            
-            if length_enabled {
-                self.wave_length_counter -= 1;
-                if self.wave_length_counter == 0 {
-                    self.disable_channel(3, mmu);
-                }
-            }
-        }
-
-        if self.noise_length_counter > 0 {
-            let nr44 = mmu.get_raw_byte(0xFF23);  // NR34
-            let length_enabled = (nr44 & 0x40) != 0;
-            
-            if length_enabled {
-                self.noise_length_counter -= 1;
-                if self.noise_length_counter == 0 {
-                    self.disable_channel(4, mmu);
-                }
-            }
-        }
+    fn frequency(mmu: &MMU, low: usize, high: usize) -> u16 {
+        u16::from(mmu.get_raw_byte(low)) | (u16::from(mmu.get_raw_byte(high) & 7) << 8)
     }
 
+    fn set_frequency(mmu: &mut MMU, low: usize, high: usize, frequency: u16) {
+        mmu.set_raw_byte(low, frequency as u8);
+        let old_high = mmu.get_raw_byte(high);
+        mmu.set_raw_byte(high, (old_high & !7) | ((frequency >> 8) as u8 & 7));
+    }
 
+    fn set_status(mmu: &mut MMU, channel: u8, enabled: bool) {
+        let mask = 1 << channel;
+        let status = mmu.get_raw_byte(0xff26);
+        mmu.set_raw_byte(
+            0xff26,
+            if enabled {
+                status | mask
+            } else {
+                status & !mask
+            },
+        );
+    }
 
-    fn check_triggers(&mut self, mmu: &mut mmu::MMU) {
-        // before checking triggers, first check writes to the length regs
-        if mmu.nr11_written {
+    fn disable_all(&mut self, mmu: &mut MMU) {
+        self.pulse1.enabled = false;
+        self.pulse2.enabled = false;
+        self.wave.enabled = false;
+        self.noise.enabled = false;
+        let power = mmu.get_raw_byte(0xff26) & 0x80;
+        mmu.set_raw_byte(0xff26, power);
+    }
+
+    fn handle_power(&mut self, mmu: &mut MMU) {
+        let powered = mmu.get_raw_byte(0xff26) & 0x80 != 0;
+        if self.powered && !powered {
+            self.disable_all(mmu);
+            for addr in 0xff10..=0xff25 {
+                mmu.set_raw_byte(addr, 0);
+            }
+            self.frame_step = 0;
+            self.left_capacitor = 0.0;
+            self.right_capacitor = 0.0;
+            mmu.nr10_written = false;
             mmu.nr11_written = false;
-            let nr11 = mmu.get_raw_byte(0xFF11);
-            self.square1_length_counter = 64 - (nr11 & 0x3F);
+            mmu.nr12_written = false;
+            mmu.nr14_written = false;
+            mmu.nr21_written = false;
+            mmu.nr22_written = false;
+            mmu.nr24_written = false;
+            mmu.nr30_written = false;
+            mmu.nr31_written = false;
+            mmu.nr34_written = false;
+            mmu.nr41_written = false;
+            mmu.nr42_written = false;
+            mmu.nr44_written = false;
+        } else if !self.powered && powered {
+            self.frame_step = 0;
+            if mmu.cgb_mode() {
+                self.pulse1.length = 0;
+                self.pulse2.length = 0;
+                self.wave.length = 0;
+                self.noise.length = 0;
+            }
+        }
+        self.powered = powered;
+    }
+
+    fn extra_length_clock(&self) -> bool {
+        self.frame_step & 1 != 0
+    }
+
+    fn clock_length(length: &mut u16, enabled: &mut bool, length_enabled: bool) {
+        if length_enabled && *length != 0 {
+            *length -= 1;
+            if *length == 0 {
+                *enabled = false;
+            }
+        }
+    }
+
+    fn handle_length_enable(
+        extra_clock: bool,
+        old: u8,
+        new: u8,
+        length: &mut u16,
+        enabled: &mut bool,
+    ) {
+        if old & 0x40 == 0 && new & 0x40 != 0 && extra_clock && *length != 0 {
+            *length -= 1;
+            if *length == 0 {
+                *enabled = false;
+            }
+        }
+    }
+
+    fn trigger_pulse(
+        channel: &mut PulseChannel,
+        mmu: &MMU,
+        envelope_addr: usize,
+        high: u8,
+        extra_clock: bool,
+    ) {
+        if channel.length == 0 {
+            channel.length = 64;
+            if high & 0x40 != 0 && extra_clock {
+                channel.length -= 1;
+            }
+        }
+        let envelope = mmu.get_raw_byte(envelope_addr);
+        channel.enabled = envelope & 0xf8 != 0;
+        channel.envelope.trigger(envelope);
+        channel.timer =
+            i32::from((2048 - Self::frequency(mmu, envelope_addr + 1, envelope_addr + 2)) * 4);
+    }
+
+    fn sweep_calculation(&mut self, mmu: &mut MMU, update: bool) -> bool {
+        let nr10 = mmu.get_raw_byte(0xff10);
+        let shift = nr10 & 7;
+        let delta = self.sweep.shadow_frequency >> shift;
+        let frequency = if nr10 & 8 != 0 {
+            self.sweep.negate_used = true;
+            self.sweep.shadow_frequency.wrapping_sub(delta)
+        } else {
+            self.sweep.shadow_frequency.wrapping_add(delta)
+        };
+        if frequency > 0x7ff {
+            self.pulse1.enabled = false;
+            return false;
+        }
+        if update && shift != 0 {
+            self.sweep.shadow_frequency = frequency;
+            Self::set_frequency(mmu, 0xff13, 0xff14, frequency);
+        }
+        true
+    }
+
+    fn trigger_sweep(&mut self, mmu: &mut MMU) {
+        let nr10 = mmu.get_raw_byte(0xff10);
+        let period = (nr10 >> 4) & 7;
+        self.sweep.shadow_frequency = Self::frequency(mmu, 0xff13, 0xff14);
+        self.sweep.timer = if period == 0 { 8 } else { period };
+        self.sweep.enabled = period != 0 || nr10 & 7 != 0;
+        self.sweep.negate_used = false;
+        if nr10 & 7 != 0 {
+            self.sweep_calculation(mmu, false);
+        }
+    }
+
+    fn handle_writes(&mut self, mmu: &mut MMU) {
+        if mmu.nr11_written {
+            self.pulse1.length = 64 - u16::from(mmu.get_raw_byte(0xff11) & 0x3f);
+            mmu.nr11_written = false;
         }
         if mmu.nr21_written {
+            self.pulse2.length = 64 - u16::from(mmu.get_raw_byte(0xff16) & 0x3f);
             mmu.nr21_written = false;
-            let nr21 = mmu.get_raw_byte(0xFF16);
-            self.square2_length_counter = 64 - (nr21 & 0x3F);
-            //println!("RESETTING CHANNEL 2");
         }
         if mmu.nr31_written {
+            self.wave.length = 256 - u16::from(mmu.get_raw_byte(0xff1b));
             mmu.nr31_written = false;
-            let nr31 = mmu.get_raw_byte(0xFF1B);
-            self.wave_length_counter = 64 - (nr31 & 0x3F);
-            //println!("RESETTING CHANNEL 3");
         }
         if mmu.nr41_written {
+            self.noise.length = 64 - u16::from(mmu.get_raw_byte(0xff20) & 0x3f);
             mmu.nr41_written = false;
-            let nr41 = mmu.get_raw_byte(0xFF20);
-            self.noise_length_counter = 64 - (nr41 & 0x3F);
-            //println!("RESETTING CHANNEL 4");
         }
 
-
-        let nr14 = mmu.get_raw_byte(0xFF14);
-        //println!("NR14: 0b{:08b}", nr14);
-        if ((nr14 & 0x80) != 0) && (mmu.nr14_written) {
-
-            // check DAC
-            let nr12 = mmu.get_raw_byte(0xFF12);
-            let dac_enabled = (nr12 & 0xF8) != 0;
-            if dac_enabled {
-                // Clear trigger bit (it's write-only, should read as 0)
-                mmu.set_raw_byte(0xFF14, nr14 & !0x80);
-
-                // Handle trigger
-                let nr11 = mmu.get_raw_byte(0xFF11);
-                self.square1_length_counter = 64 - (nr11 & 0x3F);
-
-                /*
-                let nr13 = mmu.get_raw_byte(0xFF13);
-                let frequency = nr13 as u16 | ((nr14 as u16 & 0x07) << 8);
-                if frequency == 0 {
-                    return;
-                }
-                */
-
-
-                // Enable channel in NR52
-                let nr52 = mmu.get_raw_byte(0xFF26);
-                //println!("TRIGGERING CHANNEL 1");
-                mmu.set_raw_byte(0xFF26, nr52 | 0b00000001);
-            }
-        }
-        mmu.nr14_written = false;
-
-        let nr24 = mmu.get_raw_byte(0xFF19);
-        //println!("NR24: 0b{:08b}", nr24);
-        if ((nr24 & 0x80) != 0) && (mmu.nr24_written) {
-
-            // check DAC
-            let nr22 = mmu.get_raw_byte(0xFF17);
-            let dac_enabled = (nr22 & 0xF8) != 0;
-            if dac_enabled {
-                // Clear trigger bit (it's write-only, should read as 0)
-                mmu.set_raw_byte(0xFF19, nr24 & !0x80);
-                //println!("WRITING TO NR24... POST VAL: 0b{:08b}", mmu.get_raw_byte(0xFF19));
-
-                // Handle trigger
-                let nr21 = mmu.get_raw_byte(0xFF16);
-                self.square2_length_counter = 64 - (nr21 & 0x3F);
-
-                /*
-                let nr23 = mmu.get_raw_byte(0xFF18);
-                let frequency = nr23 as u16 | ((nr24 as u16 & 0x07) << 8);
-                if frequency == 0 {
-                    return;
-                }
-                */
-
-                // Enable channel in NR52
-                let nr52 = mmu.get_raw_byte(0xFF26);
-                mmu.set_raw_byte(0xFF26, nr52 | 0b00000010);
-            }
-        }
-        mmu.nr24_written = false;
-
-        let nr34 = mmu.get_raw_byte(0xFF1E);
-        //println!("NR34: 0b{:08b}", nr34);
-        if ((nr34 & 0x80) != 0) && (mmu.nr34_written) {
-
-            // check DAC
-            let nr30 = mmu.get_raw_byte(0xFF1A);
-            let dac_enabled = (nr30 & 0x80) != 0;
-            if dac_enabled {
-                // Clear trigger bit (it's write-only, should read as 0)
-                mmu.set_raw_byte(0xFF1E, nr34 & !0x80);
-
-                // Handle trigger
-                let nr31 = mmu.get_raw_byte(0xFF1B);
-                self.wave_length_counter = 64 - (nr31 & 0x3F);
-
-                /*
-                let nr33 = mmu.get_raw_byte(0xFF1D);
-                let frequency = nr33 as u16 | ((nr34 as u16 & 0x07) << 8);
-                if frequency == 0 {
-                    return;
-                }
-                */
-
-                // Enable channel in NR52
-                let nr52 = mmu.get_raw_byte(0xFF26);
-                mmu.set_raw_byte(0xFF26, nr52 | 0b00000100);
-            }
-        }
-        mmu.nr34_written = false;
-
-        let nr44 = mmu.get_raw_byte(0xFF23);
-        //println!("NR44: 0b{:08b}", nr44);
-        if ((nr44 & 0x80) != 0) && (mmu.nr44_written) {
-
-            // check DAC
-            let nr42 = mmu.get_raw_byte(0xFF21);
-            let dac_enabled = (nr42 & 0xF8) != 0;
-            if dac_enabled {
-                // Clear trigger bit (it's write-only, should read as 0)
-                mmu.set_raw_byte(0xFF23, nr44 & !0x80);
-
-                // Handle trigger
-                let nr41 = mmu.get_raw_byte(0xFF20);
-                self.noise_length_counter = 64 - (nr41 & 0x3F);
-
-                // Enable channel in NR52
-                let nr52 = mmu.get_raw_byte(0xFF26);
-                mmu.set_raw_byte(0xFF26, nr52 | 0b00001000);
-            }
-        }
-        mmu.nr44_written = false;
-    }
-
-
-    fn generate_square1_sample(&mut self, mmu_ref : &mut mmu::MMU) -> f32 {
-        let nr52 = mmu_ref.get_byte(0xFF26 as usize);
-        if (nr52 & 0b00000001) == 0 {
-            return 0.0;
-        }
-
-
-        let nr11 = mmu_ref.get_byte(0xFF11 as usize);  // Duty cycle + sound length
-        let nr12 = mmu_ref.get_byte(0xFF12 as usize);         // Volume envelope
-        let nr13 = mmu_ref.get_byte(0xFF13 as usize);         // Frequency low 8 bits
-        let nr14 = mmu_ref.get_byte(0xFF14 as usize);        // Frequency high 3 bits + trigger 
-
-        /*
-        let current_length = 64 - (nr11 & 0x3F);
-        if self.square1_length_counter == 0 {
-            // disable the channel
-            let new_val = nr52 & 0b11111110;
-            mmu_ref.set_raw_byte(0xFF26 as usize, new_val);
-        }
-        */
-
-        let duty_pattern = (nr11 >> 6) & 0x03;     // Top 2 bits
-        let frequency = nr13 as u16 | ((nr14 as u16 & 0x07) << 8);  // 11-bit freq
-
-
-
-        let volume = (nr12 >> 4) & 0x0F;                 // Initial volume
-        
-        // 4. Generate the actual square wave sample
-        // Update internal phase based on frequency
-        self.square1_phase += (131072.0 / (2048.0 - frequency as f32)) / 44100.0;
-        if self.square1_phase >= 1.0 { self.square1_phase -= 1.0; }
-        
-        // 5. Apply duty cycle pattern and volume
-        let duty_output = match duty_pattern {
-            0 => self.square1_phase < 0.125,      // 12.5%
-            1 => self.square1_phase < 0.25,       // 25%
-            2 => self.square1_phase < 0.5,        // 50%
-            3 => self.square1_phase < 0.75,       // 75%
-            _ => false,
-        };
-        
-        if duty_output {
-            (volume as f32 / 15.0) * 0.1  // Scale volume and keep reasonable amplitude
-        } else {
-            -(volume as f32 / 15.0) * 0.1
-        }
-    }
-
-    fn generate_square2_sample(&mut self, mmu_ref : &mut mmu::MMU) -> f32 {
-        let nr52 = mmu_ref.get_byte(0xFF26 as usize);
-        if (nr52 & 0b00000010) == 0 {
-            return 0.0;
-        }
-
-        let nr21 = mmu_ref.get_byte(0xFF11 as usize);  // Duty cycle + sound length
-        let nr22 = mmu_ref.get_byte(0xFF12 as usize);         // Volume envelope
-        let nr23 = mmu_ref.get_byte(0xFF13 as usize);         // Frequency low 8 bits
-        let nr24 = mmu_ref.get_byte(0xFF14 as usize);        // Frequency high 3 bits + trigger 
-
-        /*
-        let current_length = 64 - (nr21 & 0x3F);
-        if self.square2_length_counter == 0 {
-            let new_val = nr52 & 0b11111101;
-            mmu_ref.set_raw_byte(0xFF26 as usize, new_val);
-        }
-        */
-        return 0.0;
-    }
-
-    fn generate_wave_sample(&mut self, mmu_ref : &mut mmu::MMU) -> f32 {
-        let nr52 = mmu_ref.get_byte(0xFF26 as usize);
-        if (nr52 & 0b00000100) == 0 {
-            return 0.0;
-        }
-
-        /*
-        if self.wave_length_counter == 0 {
-            let new_val = nr52 & 0b11111011;
-            mmu_ref.set_raw_byte(0xFF26 as usize, new_val);
-        }
-        */
-        return 0.0;
-    }
-
-    fn generate_noise_sample(&mut self, mmu_ref : &mut mmu::MMU) -> f32 {
-        let nr52 = mmu_ref.get_byte(0xFF26 as usize);
-        if (nr52 & 0b00001000) == 0 {
-            return 0.0;
-        }
-        /*
-        if self.noise_length_counter == 0 {
-            let new_val = nr52 & 0b11110111;
-            mmu_ref.set_raw_byte(0xFF26 as usize, new_val);
-        }
-        */
-        return 0.0;
-    }
-    
-    pub fn generate_sample(&mut self, mmu_ref : &mut mmu::MMU) -> f32 {
-        let square1 = self.generate_square1_sample(mmu_ref);
-        let square2 = self.generate_square2_sample(mmu_ref);
-        let wave = self.generate_wave_sample(mmu_ref);
-        let noise = self.generate_noise_sample(mmu_ref);
-        
-        // Mix all channels
-        (square1 + square2 + wave + noise) * 0.25  // Scale to prevent clipping
-    }
-
-    pub fn push_sample_to_audio(&mut self, sample : f32) {
-        self.audio_sender.send(sample); 
-    }
-
-    fn check_disabled(&mut self, mmu_ref : &mut mmu::MMU) {
-        let enabled = (mmu_ref.get_byte(0xFF26 as usize) & 0b10000000) != 0;
-
-        if (!enabled) && (self.master_audio_enabled) {
-            for addr in 0xFF10..0xFF26 {
-                mmu_ref.set_raw_byte(addr as usize, 0);
-            }
-        }
-        self.master_audio_enabled = enabled;
-    }
-
-    pub fn div_apu_increment(&mut self, mmu_ref : &mut mmu::MMU)-> bool {
-        let val = mmu_ref.div_apu_increment_flag;
-        if val {
-            mmu_ref.div_apu_increment_flag = false;
-        }
-        return val;
-    }
-
-    pub fn disable_channel(&mut self, channel : u8, mmu_ref : &mut mmu::MMU) {
-        // NOTE: channel is one-indexed. Starts at 1.
-        assert!(channel >= 1);
-        assert!(channel <= 4);
-        let mask_val : u8 = 1 << (channel - 1);
-        let nr52 = mmu_ref.get_raw_byte(0xFF26);
-        let new_val = nr52 & (!mask_val);
-        mmu_ref.set_raw_byte(0xFF26, new_val);
-    }
-
-    pub fn check_dac_disabled(&mut self, mmu_ref : &mut mmu::MMU) {
-        if mmu_ref.nr12_written {
-            mmu_ref.nr12_written = false;
-            let nr12 = mmu_ref.get_raw_byte(0xFF12);
-            let dac_enabled = (nr12 & 0xF8) != 0;
-            if !dac_enabled {
-                self.disable_channel(1, mmu_ref);
-            }
-        }
-        if mmu_ref.nr22_written {
-            mmu_ref.nr22_written = false;
-            let nr22 = mmu_ref.get_raw_byte(0xFF17);
-            let dac_enabled = (nr22 & 0xF8) != 0;
-            if !dac_enabled {
-                self.disable_channel(2, mmu_ref);
-            }
-        }
-        if mmu_ref.nr30_written {
-            mmu_ref.nr30_written = false;
-            let nr30 = mmu_ref.get_raw_byte(0xFF1A);
-            let dac_enabled = (nr30 & 0x80) != 0;
-            if !dac_enabled {
-                self.disable_channel(3, mmu_ref);
-            }
-        }
-        if mmu_ref.nr42_written {
-            mmu_ref.nr42_written = false;
-            let nr42 = mmu_ref.get_raw_byte(0xFF21);
-            let dac_enabled = (nr42 & 0xF8) != 0;
-            if !dac_enabled {
-                self.disable_channel(4, mmu_ref);
-            }
-        }
-    }
-
-
-    pub fn cycle(&mut self, t_cycles: u8, mmu_ref : &mut mmu::MMU) {
-        self.accumulated_cycles = self.accumulated_cycles.wrapping_add(t_cycles as u16);
-
-        self.check_disabled(mmu_ref);
-        if !self.master_audio_enabled {
+        if !self.powered {
             return;
         }
-        if self.div_apu_increment(mmu_ref) {
-            self.step = (self.step + 1) % 8;
 
-            // TODO do the other things we need to do
-            //self.update_length_counters(mmu_ref);
-            if (self.step % 2) == 0 {
-                self.update_length_counters(mmu_ref);
-
+        if mmu.nr10_written {
+            if mmu.nr10_old & 8 != 0 && mmu.get_raw_byte(0xff10) & 8 == 0 && self.sweep.negate_used
+            {
+                self.pulse1.enabled = false;
             }
+            mmu.nr10_written = false;
         }
 
-        self.check_dac_disabled(mmu_ref);
+        if mmu.nr12_written {
+            if mmu.get_raw_byte(0xff12) & 0xf8 == 0 {
+                self.pulse1.enabled = false;
+            }
+            mmu.nr12_written = false;
+        }
+        if mmu.nr22_written {
+            if mmu.get_raw_byte(0xff17) & 0xf8 == 0 {
+                self.pulse2.enabled = false;
+            }
+            mmu.nr22_written = false;
+        }
+        if mmu.nr30_written {
+            if mmu.get_raw_byte(0xff1a) & 0x80 == 0 {
+                self.wave.enabled = false;
+            }
+            mmu.nr30_written = false;
+        }
+        if mmu.nr42_written {
+            if mmu.get_raw_byte(0xff21) & 0xf8 == 0 {
+                self.noise.enabled = false;
+            }
+            mmu.nr42_written = false;
+        }
 
-        self.check_triggers(mmu_ref);
+        let extra_clock = self.extra_length_clock();
+        if mmu.nr14_written {
+            let high = mmu.get_raw_byte(0xff14);
+            Self::handle_length_enable(
+                extra_clock,
+                mmu.nr14_old,
+                high,
+                &mut self.pulse1.length,
+                &mut self.pulse1.enabled,
+            );
+            if high & 0x80 != 0 {
+                Self::trigger_pulse(&mut self.pulse1, mmu, 0xff12, high, extra_clock);
+                self.trigger_sweep(mmu);
+            }
+            mmu.set_raw_byte(0xff14, high & 0x7f);
+            mmu.nr14_written = false;
+        }
+        if mmu.nr24_written {
+            let high = mmu.get_raw_byte(0xff19);
+            Self::handle_length_enable(
+                extra_clock,
+                mmu.nr24_old,
+                high,
+                &mut self.pulse2.length,
+                &mut self.pulse2.enabled,
+            );
+            if high & 0x80 != 0 {
+                Self::trigger_pulse(&mut self.pulse2, mmu, 0xff17, high, extra_clock);
+            }
+            mmu.set_raw_byte(0xff19, high & 0x7f);
+            mmu.nr24_written = false;
+        }
+        if mmu.nr34_written {
+            let high = mmu.get_raw_byte(0xff1e);
+            Self::handle_length_enable(
+                extra_clock,
+                mmu.nr34_old,
+                high,
+                &mut self.wave.length,
+                &mut self.wave.enabled,
+            );
+            if high & 0x80 != 0 {
+                if self.wave.length == 0 {
+                    self.wave.length = 256;
+                    if high & 0x40 != 0 && extra_clock {
+                        self.wave.length -= 1;
+                    }
+                }
+                self.wave.enabled = mmu.get_raw_byte(0xff1a) & 0x80 != 0;
+                self.wave.timer = i32::from((2048 - Self::frequency(mmu, 0xff1d, 0xff1e)) * 2);
+                self.wave.position = 0;
+            }
+            mmu.set_raw_byte(0xff1e, high & 0x7f);
+            mmu.nr34_written = false;
+        }
+        if mmu.nr44_written {
+            let high = mmu.get_raw_byte(0xff23);
+            Self::handle_length_enable(
+                extra_clock,
+                mmu.nr44_old,
+                high,
+                &mut self.noise.length,
+                &mut self.noise.enabled,
+            );
+            if high & 0x80 != 0 {
+                if self.noise.length == 0 {
+                    self.noise.length = 64;
+                    if high & 0x40 != 0 && extra_clock {
+                        self.noise.length -= 1;
+                    }
+                }
+                let envelope = mmu.get_raw_byte(0xff21);
+                self.noise.enabled = envelope & 0xf8 != 0;
+                self.noise.envelope.trigger(envelope);
+                self.noise.lfsr = 0x7fff;
+                self.noise.timer = Self::noise_period(mmu.get_raw_byte(0xff22));
+            }
+            mmu.set_raw_byte(0xff23, high & 0x7f);
+            mmu.nr44_written = false;
+        }
 
+        Self::set_status(mmu, 0, self.pulse1.enabled);
+        Self::set_status(mmu, 1, self.pulse2.enabled);
+        Self::set_status(mmu, 2, self.wave.enabled);
+        Self::set_status(mmu, 3, self.noise.enabled);
+    }
 
-        const CYCLES_PER_SAMPLE: u16 = 91;
-        
-        while self.accumulated_cycles >= CYCLES_PER_SAMPLE {
-            self.accumulated_cycles -= CYCLES_PER_SAMPLE;
-            
-            // Generate one audio sample from all 4 channels
-            let sample = self.generate_sample(mmu_ref);
-            
-            // Send it to your audio buffer/cpal
-            self.push_sample_to_audio(sample);
+    fn clock_sweep(&mut self, mmu: &mut MMU) {
+        self.sweep.timer -= 1;
+        if self.sweep.timer != 0 {
+            return;
+        }
+        let period = (mmu.get_raw_byte(0xff10) >> 4) & 7;
+        self.sweep.timer = if period == 0 { 8 } else { period };
+        if self.sweep.enabled && period != 0 && self.sweep_calculation(mmu, true) {
+            self.sweep_calculation(mmu, false);
+        }
+    }
+
+    fn clock_frame_sequencer(&mut self, mmu: &mut MMU) {
+        if self.frame_step & 1 == 0 {
+            Self::clock_length(
+                &mut self.pulse1.length,
+                &mut self.pulse1.enabled,
+                mmu.get_raw_byte(0xff14) & 0x40 != 0,
+            );
+            Self::clock_length(
+                &mut self.pulse2.length,
+                &mut self.pulse2.enabled,
+                mmu.get_raw_byte(0xff19) & 0x40 != 0,
+            );
+            Self::clock_length(
+                &mut self.wave.length,
+                &mut self.wave.enabled,
+                mmu.get_raw_byte(0xff1e) & 0x40 != 0,
+            );
+            Self::clock_length(
+                &mut self.noise.length,
+                &mut self.noise.enabled,
+                mmu.get_raw_byte(0xff23) & 0x40 != 0,
+            );
+        }
+        if self.frame_step == 2 || self.frame_step == 6 {
+            self.clock_sweep(mmu);
+        }
+        if self.frame_step == 7 {
+            self.pulse1.envelope.clock();
+            self.pulse2.envelope.clock();
+            self.noise.envelope.clock();
+        }
+        self.frame_step = (self.frame_step + 1) & 7;
+    }
+
+    fn noise_period(nr43: u8) -> i32 {
+        let divisor = [8, 16, 32, 48, 64, 80, 96, 112][usize::from(nr43 & 7)];
+        divisor << (nr43 >> 4)
+    }
+
+    fn clock_channels(&mut self, cycles: i32, mmu: &mut MMU) {
+        self.pulse1
+            .clock_timer(cycles, Self::frequency(mmu, 0xff13, 0xff14));
+        self.pulse2
+            .clock_timer(cycles, Self::frequency(mmu, 0xff18, 0xff19));
+
+        self.wave.timer -= cycles;
+        let wave_period = i32::from((2048 - Self::frequency(mmu, 0xff1d, 0xff1e)) * 2);
+        while self.wave.timer <= 0 {
+            self.wave.timer += wave_period;
+            self.wave.position = (self.wave.position + 1) & 31;
+            let byte = mmu.get_raw_byte(0xff30 + usize::from(self.wave.position / 2));
+            self.wave.sample = if self.wave.position & 1 == 0 {
+                byte >> 4
+            } else {
+                byte & 0x0f
+            };
+        }
+        mmu.wave_channel_active = self.wave.enabled;
+        mmu.wave_ram_index = self.wave.position / 2;
+
+        self.noise.timer -= cycles;
+        let noise_period = Self::noise_period(mmu.get_raw_byte(0xff22));
+        while self.noise.timer <= 0 {
+            self.noise.timer += noise_period;
+            let feedback = (self.noise.lfsr ^ (self.noise.lfsr >> 1)) & 1;
+            self.noise.lfsr = (self.noise.lfsr >> 1) | (feedback << 14);
+            if mmu.get_raw_byte(0xff22) & 8 != 0 {
+                self.noise.lfsr = (self.noise.lfsr & !(1 << 6)) | (feedback << 6);
+            }
+        }
+    }
+
+    fn channel_outputs(&self, mmu: &MMU) -> [u8; 4] {
+        let wave_shift = match (mmu.get_raw_byte(0xff1c) >> 5) & 3 {
+            0 => 4,
+            1 => 0,
+            2 => 1,
+            _ => 2,
+        };
+        [
+            self.pulse1.output(mmu.get_raw_byte(0xff11) >> 6),
+            self.pulse2.output(mmu.get_raw_byte(0xff16) >> 6),
+            if self.wave.enabled {
+                self.wave.sample >> wave_shift
+            } else {
+                0
+            },
+            if self.noise.enabled && self.noise.lfsr & 1 == 0 {
+                self.noise.envelope.volume
+            } else {
+                0
+            },
+        ]
+    }
+
+    fn high_pass(input: f32, capacitor: &mut f32) -> f32 {
+        let output = input - *capacitor;
+        *capacitor = input - output * 0.996;
+        output
+    }
+
+    fn generate_sample(&mut self, mmu: &mut MMU) -> (f32, f32) {
+        let outputs = self.channel_outputs(mmu);
+        mmu.pcm12 = outputs[0] | (outputs[1] << 4);
+        mmu.pcm34 = outputs[2] | (outputs[3] << 4);
+        let routing = mmu.get_raw_byte(0xff25);
+        let volume = mmu.get_raw_byte(0xff24);
+        let mut left = 0.0;
+        let mut right = 0.0;
+        let active = [
+            self.pulse1.enabled,
+            self.pulse2.enabled,
+            self.wave.enabled,
+            self.noise.enabled,
+        ];
+        for (channel, output) in outputs.iter().enumerate() {
+            if !active[channel] {
+                continue;
+            }
+            let dac = 1.0 - f32::from(*output) / 7.5;
+            if routing & (1 << channel) != 0 {
+                right += dac;
+            }
+            if routing & (1 << (channel + 4)) != 0 {
+                left += dac;
+            }
+        }
+        left *= f32::from(((volume >> 4) & 7) + 1) / 32.0;
+        right *= f32::from((volume & 7) + 1) / 32.0;
+        (
+            Self::high_pass(left, &mut self.left_capacitor),
+            Self::high_pass(right, &mut self.right_capacitor),
+        )
+    }
+
+    pub fn cycle(&mut self, t_cycles: u8, mmu: &mut MMU) {
+        self.handle_power(mmu);
+        self.handle_writes(mmu);
+        if !self.powered {
+            return;
+        }
+
+        if mmu.div_apu_increment_flag {
+            mmu.div_apu_increment_flag = false;
+            self.clock_frame_sequencer(mmu);
+        }
+        self.clock_channels(i32::from(t_cycles), mmu);
+
+        Self::set_status(mmu, 0, self.pulse1.enabled);
+        Self::set_status(mmu, 1, self.pulse2.enabled);
+        Self::set_status(mmu, 2, self.wave.enabled);
+        Self::set_status(mmu, 3, self.noise.enabled);
+
+        self.sample_clock += u32::from(t_cycles) * self.sample_rate;
+        while self.sample_clock >= CPU_HZ {
+            self.sample_clock -= CPU_HZ;
+            let sample = self.generate_sample(mmu);
+            let _ = self.audio_sender.send(sample);
         }
     }
 }
