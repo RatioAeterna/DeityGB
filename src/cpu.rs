@@ -811,6 +811,7 @@ impl CPU  {
             let i1 = ((opcode & 0xF0) >> 4) as usize;
             let i2 = (opcode & 0x0F) as usize;
             let mut cycles : u8 = ternary!(cb_prefix, cpu_tables::cb_prefixed_cycle_times[i1][i2], cpu_tables::cycle_times[i1][i2]);
+            mmu_ref.apu_bus_cycles = cycles;
             let	instruction_size : u8 = ternary!(cb_prefix, 2, cpu_tables::instruction_sizes[i1][i2]);
             let mut skip_increment = false;
 

@@ -115,13 +115,10 @@ Run the passing DMG/CGB APU core set directly with:
 nix develop --command cargo test --release --test headless blargg_sound_core_roms_pass -- --ignored --exact
 ```
 
-The current sound baseline is 7/12 DMG and 9/12 CGB. Both suites pass register
-behavior, length counters, fifth-register trigger timing, sweep, sweep details,
-sweep overflow, and post-power register behavior. CGB additionally passes wave
-retrigger and the dedicated wave timer/phase/access test. Remaining failures
-cover frame-sequencer phase across APU power, length persistence across power,
-and cycle-window behavior for active wave RAM; these are narrower timing gaps,
-not missing pulse, wave, or noise synthesis.
+The current sound baseline is 12/12 DMG and 12/12 CGB. The aggregate runs every
+single ROM in both bundled sound suites, including frame-sequencer power timing,
+DMG/CGB length persistence, active wave-RAM arbitration, and DMG wave-retrigger
+corruption. A failure prints the suite, ROM name, and Blargg memory diagnostic.
 
 ## References
 

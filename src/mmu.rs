@@ -142,6 +142,11 @@ pub struct MMU {
         pub div_apu_increment_flag : bool,
         pub wave_channel_active : bool,
         pub wave_ram_index : u8,
+        pub wave_sample_position : u8,
+        pub wave_timer : i32,
+        pub wave_period : i32,
+        pub wave_fetch_valid : bool,
+        pub apu_bus_cycles : u8,
         pub pcm12 : u8,
         pub pcm34 : u8,
 
@@ -232,6 +237,11 @@ impl MMU {
             div_apu_increment_flag : false,
             wave_channel_active : false,
             wave_ram_index : 0,
+            wave_sample_position : 0,
+            wave_timer : 0,
+            wave_period : 4096,
+            wave_fetch_valid : false,
+            apu_bus_cycles : 0,
             pcm12 : 0,
             pcm34 : 0,
             serial_output : Vec::new(),
@@ -362,9 +372,29 @@ impl MMU {
     }
 
     pub fn apu_reg_set(&mut self, addr : usize, data : u8) {
-        if self.cgb_mode && self.wave_channel_active && (0xFF30..=0xFF3F).contains(&addr) {
-            self.memory[0xFF30 + usize::from(self.wave_ram_index)] = data;
+        if self.wave_channel_active && (0xFF30..=0xFF3F).contains(&addr) {
+            let (index, accessible) = self.wave_bus_state(0);
+            if self.cgb_mode || accessible {
+                self.memory[0xFF30 + usize::from(index)] = data;
+            }
             return;
+        }
+        if addr == 0xFF1E && data & 0x80 != 0 && !self.cgb_mode && self.wave_channel_active {
+            let (index, accessible) = self.wave_bus_state(2);
+            if accessible {
+                if index < 4 {
+                    self.memory[0xFF30] = self.memory[0xFF30 + usize::from(index)];
+                } else {
+                    let source = 0xFF30 + usize::from(index & !3);
+                    let bytes = [
+                        self.memory[source],
+                        self.memory[source + 1],
+                        self.memory[source + 2],
+                        self.memory[source + 3],
+                    ];
+                    self.memory[0xFF30..=0xFF33].copy_from_slice(&bytes);
+                }
+            }
         }
         // first, check if APU is enabled. Ignore write if not.
         let enabled = (self.get_byte(0xFF26 as usize) & 0b10000000) != 0;
@@ -450,8 +480,12 @@ impl MMU {
     }
 
     pub fn apu_reg_get(&self, addr : usize) -> u8 {
-        if self.cgb_mode && self.wave_channel_active && (0xFF30..=0xFF3F).contains(&addr) {
-            return self.memory[0xFF30 + usize::from(self.wave_ram_index)];
+        if self.wave_channel_active && (0xFF30..=0xFF3F).contains(&addr) {
+            let (index, accessible) = self.wave_bus_state(0);
+            if self.cgb_mode || accessible {
+                return self.memory[0xFF30 + usize::from(index)];
+            }
+            return 0xFF;
         }
         match addr {
             0xFF10 => self.memory[addr] | 0x80,
@@ -515,6 +549,24 @@ impl MMU {
             0xFF3F => self.memory[addr] | 0x00,
             _ => 0xFF // TODO is this what we want..?
         }
+    }
+
+    fn wave_bus_state(&self, extra_cycles: u8) -> (u8, bool) {
+        let mut timer = self.wave_timer;
+        let period = self.wave_period.max(1);
+        let mut position = self.wave_sample_position;
+        let mut fetched = self.wave_fetch_valid;
+        let elapsed = i32::from(
+            self.peripheral_cycles(self.apu_bus_cycles.saturating_add(extra_cycles)),
+        );
+        timer -= elapsed;
+        while timer <= 0 {
+            timer += period;
+            position = (position + 1) & 31;
+            fetched = true;
+        }
+        let clocks_since_fetch = period - timer;
+        (position / 2, fetched && clocks_since_fetch < 2)
     }
 
 

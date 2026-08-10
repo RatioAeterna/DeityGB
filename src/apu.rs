@@ -84,6 +84,7 @@ struct WaveChannel {
     timer: i32,
     position: u8,
     sample: u8,
+    fetched: bool,
 }
 
 #[derive(Clone)]
@@ -301,7 +302,7 @@ impl APU {
         }
     }
 
-    fn handle_writes(&mut self, mmu: &mut MMU) {
+    fn handle_writes(&mut self, mmu: &mut MMU, elapsed_cycles: i32) {
         if mmu.nr11_written {
             self.pulse1.length = 64 - u16::from(mmu.get_raw_byte(0xff11) & 0x3f);
             mmu.nr11_written = false;
@@ -405,8 +406,11 @@ impl APU {
                     }
                 }
                 self.wave.enabled = mmu.get_raw_byte(0xff1a) & 0x80 != 0;
-                self.wave.timer = i32::from((2048 - Self::frequency(mmu, 0xff1d, 0xff1e)) * 2);
+                self.wave.timer = i32::from((2048 - Self::frequency(mmu, 0xff1d, 0xff1e)) * 2)
+                    + elapsed_cycles
+                    + 6;
                 self.wave.position = 0;
+                self.wave.fetched = false;
             }
             mmu.set_raw_byte(0xff1e, high & 0x7f);
             mmu.nr34_written = false;
@@ -500,20 +504,27 @@ impl APU {
         self.pulse2
             .clock_timer(cycles, Self::frequency(mmu, 0xff18, 0xff19));
 
-        self.wave.timer -= cycles;
         let wave_period = i32::from((2048 - Self::frequency(mmu, 0xff1d, 0xff1e)) * 2);
-        while self.wave.timer <= 0 {
-            self.wave.timer += wave_period;
-            self.wave.position = (self.wave.position + 1) & 31;
-            let byte = mmu.get_raw_byte(0xff30 + usize::from(self.wave.position / 2));
-            self.wave.sample = if self.wave.position & 1 == 0 {
-                byte >> 4
-            } else {
-                byte & 0x0f
-            };
+        for _ in 0..cycles {
+            self.wave.timer -= 1;
+            if self.wave.timer <= 0 {
+                self.wave.timer += wave_period;
+                self.wave.position = (self.wave.position + 1) & 31;
+                self.wave.fetched = true;
+                let byte = mmu.get_raw_byte(0xff30 + usize::from(self.wave.position / 2));
+                self.wave.sample = if self.wave.position & 1 == 0 {
+                    byte >> 4
+                } else {
+                    byte & 0x0f
+                };
+            }
         }
         mmu.wave_channel_active = self.wave.enabled;
         mmu.wave_ram_index = self.wave.position / 2;
+        mmu.wave_sample_position = self.wave.position;
+        mmu.wave_timer = self.wave.timer;
+        mmu.wave_period = wave_period;
+        mmu.wave_fetch_valid = self.wave.fetched;
 
         self.noise.timer -= cycles;
         let noise_period = Self::noise_period(mmu.get_raw_byte(0xff22));
@@ -592,8 +603,10 @@ impl APU {
 
     pub fn cycle(&mut self, t_cycles: u8, mmu: &mut MMU) {
         self.handle_power(mmu);
-        self.handle_writes(mmu);
+        self.handle_writes(mmu, i32::from(t_cycles));
         if !self.powered {
+            mmu.div_apu_increment_flag = false;
+            mmu.wave_channel_active = false;
             return;
         }
 

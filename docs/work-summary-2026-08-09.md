@@ -535,16 +535,16 @@ receive the stereo pair plus an averaged fill for remaining channels.
   zero-status interval while a ROM initializes its report buffer.
 - Added command-line reporting of Blargg memory status and diagnostics, a fast
   protocol decoding test, and a fast trigger/DAC channel-status test.
-- Added an ignored aggregate regression for all currently passing sound ROMs.
-- Baseline before the rewrite was 1/12 DMG and 1/12 CGB. The current result is
-  7/12 DMG and 9/12 CGB, with all former sweep timeouts eliminated.
+- Added an ignored aggregate regression for the sound ROMs passing at this
+  initial checkpoint.
+- Baseline before the rewrite was 1/12 DMG and 1/12 CGB. This first checkpoint
+  reached 7/12 DMG and 9/12 CGB, with all former sweep timeouts eliminated.
 - Passing in both modes: registers, length counters, trigger timing, sweep,
   sweep details, trigger overflow, and registers after power. CGB also passes
   wave retrigger and its dedicated wave timer/phase/access test.
-- All active Rust regressions pass. Remaining Blargg failures are sequencer phase
-  across APU power, length persistence across APU power, and DMG/CGB active wave
-  RAM cycle windows. Those require finer memory-access timing than the current
-  instruction-batched APU boundary exposes and are documented rather than hidden.
+- All active Rust regressions passed. The tests left for the completion pass
+  covered sequencer phase across APU power, length persistence across power,
+  and DMG/CGB active wave-RAM cycle windows.
 
 The improvement was measured incrementally rather than inferred from audible
 output. The corrected initial baseline exposed a false-positive hazard in the
@@ -561,14 +561,14 @@ sweep from subtract to add needed the hidden `negate_used` state; and powered-of
 DMG writes needed field-level masking. This progression is preserved in the
 final architecture rather than special-casing individual test ROMs.
 
-The remaining wave access failures illustrate the current timing boundary. CPU
+Those wave access failures exposed the timing boundary that the later completion
+pass addressed. CPU
 instructions execute their memory access before DeityGB advances the APU for the
 instruction's aggregate cycle count. Real DMG wave RAM is available only during
 a very narrow interval around the channel's own byte fetch. Correctly deciding
-whether a CPU read landed inside that interval ultimately requires interleaving
-bus accesses and APU timer advancement more finely than one post-instruction
-call. The implementation keeps the broad hardware behavior and documents that
-architectural limitation instead of adding ROM-specific timing guesses.
+whether a CPU read landed inside that interval required preserving the CPU bus
+phase and projecting channel-3 state to it. The completed model is described in
+`APU Timing Completion: 24/24 Blargg Sound ROMs` below.
 
 ### Reproduction Commands
 
@@ -578,7 +578,7 @@ Fast active tests:
 nix develop --command cargo test --release --lib --tests
 ```
 
-The 16-ROM passing sound checkpoint:
+The complete 24-ROM sound regression:
 
 ```sh
 nix develop --command cargo test --release --test headless \
@@ -592,7 +592,7 @@ nix develop --command cargo run --release --bin DeityGB -- \
   src/roms/pokemon_silver.gbc --apu
 ```
 
-For debugging individual remaining cases, the headless binary prints both the
+For debugging an individual case, the headless binary prints both the
 outcome and Blargg's escaped memory report:
 
 ```sh
@@ -652,3 +652,104 @@ was a cartridge-controller failure, not a Link's Awakening-specific CPU bug.
 - The existing `.sav` file is not consumed by this work. Save persistence remains
   intentionally disabled; this test exercises newly allocated in-memory MBC5
   RAM and starts from the game's normal empty-file behavior.
+
+## APU Timing Completion: 24/24 Blargg Sound ROMs
+
+The initial APU checkpoint deliberately stopped at 7/12 DMG and 9/12 CGB. Its
+channel generators were functional, but the remaining tests observed details
+at a finer boundary than an audible gameplay check can reveal. This pass closes
+that gap: every bundled `dmg_sound` and `cgb_sound` single ROM now reports
+`Passed`, giving a 12/12 result on each hardware model and 24/24 overall.
+
+### Why the Last Eight Tests Were Different
+
+The earlier passing tests mostly observed register values and channel status
+over relatively long intervals. Tests 07-10 and DMG test 12 deliberately place
+CPU accesses within a few master clocks of hidden APU events. They therefore
+exercise three clocks at once:
+
+- The CPU performs a memory access during one machine cycle of an instruction.
+- DIV-APU advances at 512 Hz from a falling divider bit and clocks length,
+  sweep, and envelope units on selected sequencer phases.
+- Channel 3 fetches a four-bit sample on its own frequency timer and temporarily
+  owns one wave-RAM byte while doing so.
+
+Treating a complete CPU instruction as an indivisible event loses the ordering
+between those clocks. DeityGB still executes instructions atomically, but now
+records enough timing context to project a wave-bus access to the instruction's
+memory phase instead of using stale state from the previous instruction.
+
+### DIV-APU Power and Length Semantics
+
+The frame sequencer itself resets when the APU transitions from off to on, but
+a divider edge observed while sound is powered off must not remain queued and
+clock a newly powered sequencer immediately. The old boolean edge flag survived
+the powered-off early return, producing a phantom length/sweep clock at power-up.
+The APU now consumes such edges while off without clocking channel state.
+
+This one ordering fix resolves both suites' test 07 and test 08:
+
+- Test 07 verifies length and sweep periods, synchronization between them, and
+  the next frame time after several power transitions separated by 8192 clocks.
+- On DMG, powered-off writes to the four length fields remain legal and retained,
+  while the counters do not run. The observed values are `33 44 11 22`.
+- On CGB, powering the APU up resets the hidden length counters. The same test
+  consequently observes `40 00 40 40`, demonstrating that the model difference
+  is intentional rather than a shared approximation.
+
+### Wave RAM as an Arbitrated Bus
+
+Wave RAM is ordinary memory only while channel 3 is inactive. During playback,
+channel 3 has priority over the CPU:
+
+- CGB CPU reads and writes are redirected to the byte selected by the current
+  wave sample position, regardless of the requested address.
+- DMG performs the same redirection only during the narrow fetch window. Reads
+  outside it return `FF`, and writes outside it are discarded.
+- The fetch-valid state is separate from the timer value. Immediately after a
+  trigger, a countdown can resemble the aftermath of a fetch even though no
+  sample has actually been fetched yet. Remembering this distinction fixes the
+  first boundary case in DMG test 09.
+
+The MMU now receives the wave timer, period, sample position, and whether a real
+fetch has occurred. The CPU publishes the current instruction's cycle count.
+For an active wave-RAM access, the MMU projects the channel state to that bus
+phase and decides which byte is visible and whether DMG permits the access. This
+is a reusable timing model; it does not inspect ROM identity or test addresses.
+
+### Trigger Latency and DMG Corruption
+
+Channel 3 does not fetch immediately on trigger. Its frequency timer includes
+the six-clock startup latency observed by the sound tests, and the previously
+buffered sample remains the initial output. This aligns CGB's continuously
+redirected wave reads with the hardware checksum.
+
+DMG adds a destructive retrigger quirk when a trigger coincides with a wave
+fetch. If the active byte is 0-3, its value is copied into wave byte 0. If it is
+in bytes 4-15, the aligned four-byte group containing it is copied into bytes
+0-3. Trigger arbitration is evaluated two APU clocks later than an ordinary
+wave-RAM access, so it has its own observation offset while sharing the same
+bus-state projection. This reproduces the corruption tested by ROM 10 without
+changing CGB behavior.
+
+### Regression Shape and Result
+
+The ignored aggregate regression now lists all twelve ROMs from each suite,
+instead of silently omitting known failures. Each ROM boots through the bundled
+DMG boot ROM, runs for up to 30 emulated seconds, and must produce Blargg's
+signed cartridge-RAM `Passed` result. The final matrix is:
+
+- DMG sound: 12 passed, 0 failed, 0 omitted.
+- CGB sound: 12 passed, 0 failed, 0 omitted.
+- Combined: 24 passed, 0 failed, 0 omitted.
+
+The implementation and diagnosis use Pan Docs, hardware behavior documented by
+the test suite, and the bundled test sources. No implementation from another
+emulator was used or copied.
+
+Run the complete matrix with:
+
+```sh
+nix develop --command cargo test --release --test headless \
+  blargg_sound_core_roms_pass -- --ignored --exact
+```
