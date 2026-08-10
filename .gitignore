@@ -1,0 +1,24 @@
+/target/
+/log.txt
+/src/log.txt
+**/*.swp
+*.sav
+
+# Local commercial ROMs and downloaded test/tool repositories.
+/src/roms/
+/src/gameboy-doctor/
+/macroquad/
+/src/10
+/src/*.zip
+
+# Local instruction and framebuffer traces.
+/res
+/res2
+/tetris_trace
+/src/COMPOSITE*
+/src/INDIVIDUAL*
+/src/diff_two_res
+/src/foo
+/src/res1
+/src/res2
+/src/tetris_trace

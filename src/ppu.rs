@@ -47,6 +47,7 @@ pub struct PPU {
     mode : PpuMode,
     sprites : [Sprite; 40],
     window_line_counter : u8,
+    lcd_enabled: bool,
 }
 
 impl PPU {
@@ -68,6 +69,7 @@ impl PPU {
             mode : OAM,
             sprites : [Sprite::default(); 40],
             window_line_counter : 0,
+            lcd_enabled: false,
         }
     }
     
@@ -312,6 +314,26 @@ impl PPU {
     }
 
     pub fn cycle(&mut self, t_cycles: u8, mmu_ref : &mut mmu::MMU) {
+        let lcd_enabled = self.get_lcdc(mmu_ref) & 0x80 != 0;
+        if !lcd_enabled {
+            self.accumulated_cycles = 0;
+            self.mode = HBlank;
+            self.window_line_counter = 0;
+            self.lcd_enabled = false;
+            mmu_ref.set_raw_byte(0xFF44, 0);
+            let stat = mmu_ref.get_byte(0xFF41) & 0xFC;
+            mmu_ref.set_raw_byte(0xFF41, stat);
+            return;
+        }
+        if !self.lcd_enabled {
+            self.accumulated_cycles = 0;
+            self.mode = OAM;
+            self.window_line_counter = 0;
+            self.lcd_enabled = true;
+            mmu_ref.set_raw_byte(0xFF44, 0);
+            self.toggle_stat_mode(2, mmu_ref);
+        }
+
         self.accumulated_cycles = self.accumulated_cycles.wrapping_add(t_cycles as u16);
 
         let ly = self.get_ly(mmu_ref);
@@ -396,6 +418,7 @@ impl PPU {
                     //self.accumulated_cycles = 0;
                     self.accumulated_cycles -= 456;
                     if self.get_ly(mmu_ref) == 0 {
+                        self.window_line_counter = 0;
                         self.mode = OAM;
                         self.toggle_stat_mode(2, mmu_ref);
                         return;
@@ -405,36 +428,18 @@ impl PPU {
         }
     }
 
-    fn apply_palette_to_four_pixels(&mut self, four_pixels: u8, palette: u8) -> u8 {
-       let mut result = 0u8;
-       
-       for i in 0..4 {
-           // Extract 2-bit pixel value
-           let shift = i * 2;
-           let pixel_value = (four_pixels >> shift) & 0b11;
-           
-           // Apply palette lookup
-           let palette_shift = pixel_value * 2;
-           let final_pixel = (palette >> palette_shift) & 0b11;
-           
-           // Put the result back in the same position
-           result |= final_pixel << shift;
-       }
-       
-       result
+    fn apply_palette(&self, pixel: u8, palette: u8) -> u8 {
+        (palette >> (pixel * 2)) & 0b11
     }
 
     pub fn sprite_on_scanline(&mut self, sprite : &Sprite, mmu_ref : &mut mmu::MMU) -> bool {
         let lcdc = self.get_lcdc(mmu_ref);
         let obj_size_flag = (lcdc >> 2) & 1;
-        let sprite_height = if obj_size_flag == 1 { 16 } else { 8 };
+        let sprite_height: i16 = if obj_size_flag == 1 { 16 } else { 8 };
 
-        let ly : u8 = self.get_ly(mmu_ref);
-        let sprite_y : u8 = sprite.y - 16;
-        if (ly >= sprite_y) && (ly < sprite_y + sprite_height) {
-            return true;
-        }
-        return false;
+        let ly = self.get_ly(mmu_ref) as i16;
+        let sprite_y = sprite.y as i16 - 16;
+        ly >= sprite_y && ly < sprite_y + sprite_height
 
     }
 
@@ -445,10 +450,10 @@ impl PPU {
             return;
         }
 
-        let ly : u8 = self.get_ly(mmu_ref);
+        let ly = self.get_ly(mmu_ref);
 
         let obj_size_flag = (lcdc >> 2) & 1;
-        let sprite_height = if obj_size_flag == 1 { 16 } else { 8 };
+        let sprite_height: i16 = if obj_size_flag == 1 { 16 } else { 8 };
 
 
         self.tiledata_start = 0x8000;
@@ -480,8 +485,9 @@ impl PPU {
 
         //for (i, sprite) in sprites.iter().enumerate() {
         for (i, sprite) in sprites_with_indices {
-            let sprite_y : u8 = sprite.y - 16;
-            let sprite_x : u8 = sprite.x - 8;
+            let sprite_y = sprite.y as i16 - 16;
+            let sprite_x = sprite.x as i16 - 8;
+            let sprite_row = ly as i16 - sprite_y;
 
             let mut tile_id : u8 = sprite.tile_index;
             if sprite_height == 16 {
@@ -497,38 +503,29 @@ impl PPU {
                 palette = mmu_ref.get_byte(0xFF48 as usize);
             }
 
-            if (ly >= sprite_y) && (ly < sprite_y + sprite_height) {
-                let scy = self.get_scy(mmu_ref);
-                let scx = self.get_scx(mmu_ref);
-
+            if sprite_row >= 0 && sprite_row < sprite_height {
                 // check if we're in the lower half of a tall sprite
                 // use the consecutive tile ID if so
+                let flipped_row = if sprite.y_flip {
+                    sprite_height - 1 - sprite_row
+                } else {
+                    sprite_row
+                };
                 if sprite_height == 16 {
-                    let drawing_second_half = ly >= (sprite_y + 8);
-                    if sprite.y_flip {
-                        if !drawing_second_half {
-                            tile_id = tile_id+1;
-                        }
-                    }
-                    else {
-                        if drawing_second_half {
-                            tile_id = tile_id+1;
-                        }
-
+                    if flipped_row >= 8 {
+                        tile_id += 1;
                     }
                 }
 
-                for fake_lx in sprite_x..(sprite_x+8) {
-                    let tile_x = if sprite.x_flip { 7 - fake_lx } else { fake_lx };
-                    let tile_y = if sprite.y_flip { 7 - ly } else { ly };
-                    // DEBUG
-                    /*
-                    let tile_x = if false { 7 - fake_lx } else { fake_lx };
-                    let tile_y = if false { 7 - ly } else { ly };
-                    */
+                let first_screen_x = sprite_x.max(0);
+                let last_screen_x = (sprite_x + 8).min(160);
+                for screen_x in first_screen_x..last_screen_x {
+                    let sprite_col = screen_x - sprite_x;
+                    let tile_x = if sprite.x_flip { 7 - sprite_col } else { sprite_col };
+                    let tile_y = flipped_row % 8;
 
                     let pixel_data : u8 = self.tiledata_fetch_pixel(tile_x as usize, tile_y as usize, tile_id as usize, mmu_ref);
-                    let colored_pixel_data : u8 = self.apply_palette_to_four_pixels(pixel_data, palette);
+                    let colored_pixel_data = self.apply_palette(pixel_data, palette);
                     /*
                     if tile_id == 0x0A {
                         println!("COVER.. FAKE_LX: {}, COLORED PIXEL {:#010b}", fake_lx, colored_pixel_data);
@@ -537,7 +534,7 @@ impl PPU {
                         println!("MOLE.. FAKE_LX: {}, COLORED PIXEL {:#010b}, original: {:#010b}", fake_lx, colored_pixel_data, pixel_data);
                     }
                     */
-                    self.set_screen_pixel(fake_lx, ly, colored_pixel_data, true); // sets the actual pixel into the screen 
+                    self.set_screen_pixel(screen_x as u8, ly, colored_pixel_data, true); // sets the actual pixel into the screen
                 }
                 sprites_drawn += 1;
                 if sprites_drawn == 10 {
@@ -550,17 +547,11 @@ impl PPU {
 
     pub fn render_window_line(&mut self, mmu_ref : &mut mmu::MMU)  {
         let lcdc = self.get_lcdc(mmu_ref);
-
-        let lcdc = self.get_lcdc(mmu_ref);
-        let window_enabled = lcdc & 0x20 != 0;
+        let window_enabled = lcdc & 0x21 == 0x21;
         if !window_enabled {
             self.window_line_counter = 0;
             return;
         }
-
-        let scy = self.get_scy(mmu_ref);
-        let scx = self.get_scx(mmu_ref);
-
 
         self.tilemap_start = ternary!((lcdc & 0b01000000) != 0, 0x9C00, 0x9800);
         self.tiledata_start = ternary!((lcdc & 0b00010000) != 0, 0x8000, 0x8800);
@@ -569,8 +560,8 @@ impl PPU {
 
         let ly : u8 = self.get_ly(mmu_ref);
 
-        let mut wx : u8 = mmu_ref.get_byte(0xFF4B as usize);
-        let mut wy : u8 = mmu_ref.get_byte(0xFF4A as usize);
+        let wx : u8 = mmu_ref.get_byte(0xFF4B as usize);
+        let wy : u8 = mmu_ref.get_byte(0xFF4A as usize);
 
         if (ly < wy) || (wx > 166) || (wy > 143) {
             return;
@@ -604,13 +595,15 @@ impl PPU {
 
             if signed_tiledata_indices {
                 let signed_tile_id : isize = (tile_id as i8) as isize;
-                pixel_data = self.tiledata_fetch_pixel_signed(fake_lx as usize, ly as usize, signed_tile_id, mmu_ref);
+                pixel_data = self.tiledata_fetch_pixel_signed(window_x as usize, self.window_line_counter as usize, signed_tile_id, mmu_ref);
             }
             else {
-                pixel_data = self.tiledata_fetch_pixel(fake_lx as usize, ly as usize, tile_id as usize, mmu_ref);
+                pixel_data = self.tiledata_fetch_pixel(window_x as usize, self.window_line_counter as usize, tile_id as usize, mmu_ref);
             }
 
-            self.set_screen_pixel(fake_lx, ly, pixel_data, false); // sets the actual pixel into the screen 
+            let palette = mmu_ref.get_byte(0xFF47);
+            let colored_pixel_data = self.apply_palette(pixel_data, palette);
+            self.set_screen_pixel(fake_lx, ly, colored_pixel_data, false); // sets the actual pixel into the screen
         }
         self.window_line_counter = self.window_line_counter.wrapping_add(1);
     }
@@ -674,8 +667,8 @@ impl PPU {
             }
 
             //let pixel_data : u8 = self.tiledata_fetch_pixel(bg_x as usize, bg_y as usize, tile_id as usize, mmu_ref);
-            let colored_pixel_data : u8 = self.apply_palette_to_four_pixels(pixel_data, palette);
-            self.set_screen_pixel(lx, ly, pixel_data, false); // sets the actual pixel into the screen 
+            let colored_pixel_data = self.apply_palette(pixel_data, palette);
+            self.set_screen_pixel(lx, ly, colored_pixel_data, false); // sets the actual pixel into the screen
         }
     }
 

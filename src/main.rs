@@ -1,30 +1,23 @@
 use std::env;
-use std::fs::File;
-use std::io::prelude::*;
-use std::path::Path;
 
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::sync::mpsc;
 use macroquad::prelude::*;
+use deitygb::{apu, cpu, mmu, ppu};
+use deitygb::headless::{default_boot_rom_path, load_file};
+use deitygb::mmu::JoypadButton;
 
 
-mod cpu;
-mod mmu;
-mod ppu;
-mod apu;
-mod cpu_tables;
-mod disassembler;
-
-
-const CPU_FREQUENCY : u32 = 4194304; // 4.2 MHz
-const FRAME_RATE: u32 = 60;
-const CYCLES_PER_FRAME: u32 = CPU_FREQUENCY / FRAME_RATE;
+const CYCLES_PER_FRAME: u32 = 70_224;
 
 const GB_SCREEN_DIM : u32 = 23040; // 160x144
 const SCREEN_UPSCALE_FACTOR : f32 = 5.0; // gameboy screen is super tiny, so we upscale it
+
+fn host_frame_due(vblank_frame_ready: bool, accumulated_cycles: u32) -> bool {
+    vblank_frame_ready || accumulated_cycles >= CYCLES_PER_FRAME
+}
 
 
 pub struct SimpleAudio {
@@ -64,75 +57,33 @@ impl SimpleAudio {
 
 
 fn handle_input(mmu: &mut mmu::MMU) {
-    // Joypad register address
-    let joypad_reg = 0xFF00;
-    let mut joypad_state = mmu.get_byte(joypad_reg);
-
-
-    // Reset lower 4 bits
-    joypad_state |= 0x0F;
-
-    let select_buttons = (joypad_state & 0b00100000) == 0;
-    let select_dpad = (joypad_state & 0b00010000) == 0;
-
-
-    if select_dpad {
-        if is_key_down(KeyCode::W) {
-            joypad_state &= !0b00000100; // Up
-            mmu.last_input_dpad = true;
-        }
-        if is_key_down(KeyCode::A) {
-            joypad_state &= !0b00000010; // Left
-            mmu.last_input_dpad = true;
-        }
-        if is_key_down(KeyCode::S) {
-            joypad_state &= !0b00001000; // Down
-            mmu.last_input_dpad = true;
-        }
-        if is_key_down(KeyCode::D) {
-            joypad_state &= !0b00000001; // Right
-            mmu.last_input_dpad = true;
-        }
-    }
-    if select_buttons {
-        if is_key_down(KeyCode::J) {
-            joypad_state &= !0b00000001; // A
-            mmu.last_input_dpad = false;
-        }
-        if is_key_down(KeyCode::K) {
-            joypad_state &= !0b00000010; // B
-            mmu.last_input_dpad = false;
-        }
-        if is_key_down(KeyCode::LeftShift) {
-            joypad_state &= !0b00000100; // Select
-            mmu.last_input_dpad = false;
-        }
-        if is_key_down(KeyCode::Enter) {
-            joypad_state &= !0b00001000; // Start
-            mmu.last_input_dpad = false;
-        }
-    }
-
-
-    //println!("0b{:08b}", joypad_state);
-    mmu.set_joypad_state(joypad_state);
+    mmu.set_joypad_button(JoypadButton::Up, is_key_down(KeyCode::W));
+    mmu.set_joypad_button(JoypadButton::Left, is_key_down(KeyCode::A));
+    mmu.set_joypad_button(JoypadButton::Down, is_key_down(KeyCode::S));
+    mmu.set_joypad_button(JoypadButton::Right, is_key_down(KeyCode::D));
+    mmu.set_joypad_button(JoypadButton::A, is_key_down(KeyCode::J));
+    mmu.set_joypad_button(JoypadButton::B, is_key_down(KeyCode::K));
+    mmu.set_joypad_button(JoypadButton::Select, is_key_down(KeyCode::LeftShift));
+    mmu.set_joypad_button(JoypadButton::Start, is_key_down(KeyCode::Enter));
 }
-
-pub fn load_file_bytes(path: &str) -> Vec<u8> {
-    let mut file = File::open(path).expect("Couldn't open file");
-    let mut buffer = Vec::new();
-    file.read_to_end(&mut buffer).expect("Couldn't read file");
-    buffer
-}
-
-
-
 
 #[macroquad::main("Fierce Deity's GB")]
 async fn main() {
     let args: Vec<String> = env::args().collect();
+    if args.len() < 2 {
+        eprintln!("usage: DeityGB <rom.gb> [--apu] [--capture-lcd]");
+        return;
+    }
+    let apu_enabled = args.iter().any(|arg| arg == "--apu");
+    let capture_lcd = args.iter().any(|arg| arg == "--capture-lcd");
 
-    let (audio, sender) = SimpleAudio::new();
+    let (_audio, sender, _silent_receiver) = if apu_enabled {
+        let (audio, sender) = SimpleAudio::new();
+        (Some(audio), sender, None)
+    } else {
+        let (sender, receiver) = mpsc::channel();
+        (None, sender, Some(receiver))
+    };
 
     let mut mmu = mmu::MMU::new();
     let mut cpu = cpu::CPU::new();
@@ -149,7 +100,7 @@ async fn main() {
     let mut byte_buffer = Vec::new();
     cartridge.read_to_end(&mut byte_buffer);
     */
-    let mut boot_byte_buffer = load_file_bytes("dmg_boot.bin");
+    let boot_byte_buffer = load_file(&default_boot_rom_path()).expect("Couldn't read boot ROM");
     mmu.load_boot_rom(&boot_byte_buffer);
     mmu.map_cartridge_nintendo_logo();
 
@@ -162,10 +113,8 @@ async fn main() {
     println!("{}", hex_str);
     */
 
-    if args.len() > 1 {
-        let mut cartridge_byte_buffer = load_file_bytes(&args[1]);
-        mmu.load_rom(&cartridge_byte_buffer);
-    }
+    let cartridge_byte_buffer = load_file(args[1].as_ref()).expect("Couldn't read cartridge ROM");
+    mmu.load_rom(&cartridge_byte_buffer);
 
     let fd_title : String = "Fierce Deity's GB".to_string();
     let conf = Conf {
@@ -175,26 +124,34 @@ async fn main() {
         ..Default::default()
     };
 
-    let mut accumulated_cycles : u16 = 0;
+    let mut accumulated_cycles : u32 = 0;
     let mut gb_screen : [u8; 5760] = [0; 5760];
 
     // NOTE: We have four pixels per bit, so we multiply by 4 once, and then there are four
     // CHANNELS per pixel (rgba) so we multiply by 4 again.
     let screen_dimension : usize = gb_screen.len() * 4 * 4;
-    let mut screen_bitmap_rgba : Vec<u8> = vec![0; screen_dimension];
+    let mut screen_image = Image {
+        bytes: vec![0; screen_dimension],
+        width: 160,
+        height: 144,
+    };
+    let screen_texture = Texture2D::from_rgba8(160, 144, &screen_image.bytes);
+    screen_texture.set_filter(FilterMode::Nearest);
 
 
     let mut last_fps_check = get_time();
     let mut frames = 0;
     let mut fps_display = String::new();
 
-    //let target_fps = 59.7275;
-    let target_fps = 62.7275;
+    let target_fps = 59.7275;
     let frame_duration = Duration::from_secs_f64(1.0 / target_fps);
     let mut last_frame_time = Instant::now();
 
 
     let mut rendered_yet : bool = false;
+    let mut last_lcd_enabled = mmu.get_byte(0xFF40) & 0x80 != 0;
+    let mut lcd_transition = 0u32;
+    let mut frames_since_lcd_transition = None;
     // Used to keep track of whether we have completed our *one* (1) per-frame render during
     // the vblank period of this frame, yet.
     loop {
@@ -209,14 +166,41 @@ async fn main() {
         // After accumulating 456 cycles, we render a single line with the PPU.
         // Once 144 lines are rendered, we enter VBlank, where we can safely copy the screen buffer to display it.
         let cycles = cpu.cycle(&mut mmu);
+        accumulated_cycles = accumulated_cycles.saturating_add(cycles as u32);
         //println!("CYCLES: {}, rendered_yet: {}", cycles, rendered_yet);
         ppu.cycle(cycles, &mut mmu);
-        apu.cycle(cycles, &mut mmu);
+        if apu_enabled {
+            apu.cycle(cycles, &mut mmu);
+        }
+
+        let lcd_enabled = mmu.get_byte(0xFF40) & 0x80 != 0;
+        if capture_lcd && lcd_enabled != last_lcd_enabled {
+            lcd_transition += 1;
+            frames_since_lcd_transition = Some(0u32);
+            eprintln!(
+                "lcd transition={} enabled={} bank={:#04x} pc={:#06x} lcdc={:#04x} stat={:#04x} ly={} ie={:#04x} if={:#04x}",
+                lcd_transition,
+                lcd_enabled,
+                mmu.mapped_rom_bank(cpu.program_counter()),
+                cpu.program_counter(),
+                mmu.get_byte(0xFF40),
+                mmu.get_byte(0xFF41),
+                mmu.get_byte(0xFF44),
+                mmu.get_byte(0xFFFF),
+                mmu.get_byte(0xFF0F),
+            );
+        }
+        last_lcd_enabled = lcd_enabled;
 
         handle_input(&mut mmu);
 
-        if ppu.reached_vblank() && !rendered_yet {
-            gb_screen = *ppu.get_buffer();
+        let vblank_frame_ready = ppu.reached_vblank() && !rendered_yet;
+        if host_frame_due(vblank_frame_ready, accumulated_cycles) {
+            if vblank_frame_ready {
+                gb_screen = *ppu.get_buffer();
+                rendered_yet = true;
+            }
+            accumulated_cycles = 0;
 
             for i in 0..(gb_screen.len()) {
 
@@ -232,38 +216,35 @@ async fn main() {
                     match pixel {
                         // the alleged color scheme
                         0b00 => { // white
-                                  screen_bitmap_rgba[pixel_idx+0] = 0xC4;
-                                  screen_bitmap_rgba[pixel_idx+1] = 0xCF;
-                                  screen_bitmap_rgba[pixel_idx+2] = 0xA1;
+                                  screen_image.bytes[pixel_idx+0] = 0xC4;
+                                  screen_image.bytes[pixel_idx+1] = 0xCF;
+                                  screen_image.bytes[pixel_idx+2] = 0xA1;
                                 },
                         0b01 => { // light gray
-                                  screen_bitmap_rgba[pixel_idx+0] = 0x8B;
-                                  screen_bitmap_rgba[pixel_idx+1] = 0xAC;
-                                  screen_bitmap_rgba[pixel_idx+2] = 0x0F;
+                                  screen_image.bytes[pixel_idx+0] = 0x8B;
+                                  screen_image.bytes[pixel_idx+1] = 0xAC;
+                                  screen_image.bytes[pixel_idx+2] = 0x0F;
                                 },
                         0b10 => { // dark gray
-                                  screen_bitmap_rgba[pixel_idx+0] = 0x30;
-                                  screen_bitmap_rgba[pixel_idx+1] = 0x62;
-                                  screen_bitmap_rgba[pixel_idx+2] = 0x30;
+                                  screen_image.bytes[pixel_idx+0] = 0x30;
+                                  screen_image.bytes[pixel_idx+1] = 0x62;
+                                  screen_image.bytes[pixel_idx+2] = 0x30;
                                 },
                         0b11 => { // black
-                                  screen_bitmap_rgba[pixel_idx+0] = 0x0F;
-                                  screen_bitmap_rgba[pixel_idx+1] = 0x38;
-                                  screen_bitmap_rgba[pixel_idx+2] = 0x0F;
+                                  screen_image.bytes[pixel_idx+0] = 0x0F;
+                                  screen_image.bytes[pixel_idx+1] = 0x38;
+                                  screen_image.bytes[pixel_idx+2] = 0x0F;
                                 },
 
                         _ => panic!("Invalid pixel value"),
                     }
                     // alpha channel
-                    screen_bitmap_rgba[pixel_idx+3] = 255;
+                    screen_image.bytes[pixel_idx+3] = 255;
                 }
             }
-            rendered_yet = true;
-
-            let texture = Texture2D::from_rgba8(160, 144, &screen_bitmap_rgba);
-            texture.set_filter(FilterMode::Nearest);
+            screen_texture.update(&screen_image);
             draw_texture_ex(
-                &texture,
+                &screen_texture,
                 0.0,
                 0.0,
                 WHITE,
@@ -294,11 +275,44 @@ async fn main() {
 
             draw_text(&fps_display, 10.0, 20.0, 30.0, BLACK);
 
-
+            if capture_lcd {
+                if let Some(frame) = frames_since_lcd_transition {
+                    if matches!(frame, 0 | 1 | 2 | 5 | 10 | 30 | 60 | 120) {
+                        let prefix = format!(
+                            "/tmp/deitygb-lcd-{:02}-{:03}",
+                            lcd_transition, frame
+                        );
+                        screen_image.export_png(&format!("{}-framebuffer.png", prefix));
+                        get_screen_data().export_png(&format!("{}-window.png", prefix));
+                        eprintln!(
+                            "lcd capture={} bank={:#04x} pc={:#06x} lcdc={:#04x} stat={:#04x} ly={}",
+                            prefix,
+                            mmu.mapped_rom_bank(cpu.program_counter()),
+                            cpu.program_counter(),
+                            mmu.get_byte(0xFF40),
+                            mmu.get_byte(0xFF41),
+                            mmu.get_byte(0xFF44),
+                        );
+                    }
+                    frames_since_lcd_transition = Some(frame.saturating_add(1));
+                }
+            }
 
             next_frame().await;
         }
     }
 
 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_frame_is_still_due_when_lcd_produces_no_vblank() {
+        assert!(!host_frame_due(false, CYCLES_PER_FRAME - 1));
+        assert!(host_frame_due(false, CYCLES_PER_FRAME));
+        assert!(host_frame_due(true, 0));
+    }
 }

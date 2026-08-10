@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
+use std::path::Path;
 use csv::ReaderBuilder;
 
 #[derive(Clone)]
@@ -10,7 +11,9 @@ pub struct Disassembler {
 
 impl Disassembler {
     pub fn from_csv() -> Self {
-        let file = File::open("opcodes.csv").expect("Failed to open instruction CSV");
+        let file = File::open("opcodes.csv")
+            .or_else(|_| File::open(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/opcodes.csv")))
+            .expect("Failed to open instruction CSV");
         let mut rdr = ReaderBuilder::new()
             .has_headers(true)
             .from_reader(BufReader::new(file));

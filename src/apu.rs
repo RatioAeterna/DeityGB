@@ -51,15 +51,9 @@ impl APU {
             let length_enabled = (nr14 & 0x40) != 0;  // Bit 6 enables length
             
             if length_enabled {
-                println!("Square1 length counter: {}", self.square1_length_counter);
                 self.square1_length_counter -= 1;
                 if self.square1_length_counter == 0 {
-                    // disable the channel
-                    let nr52 = mmu.get_raw_byte(0xFF26);
-                    let new_val = nr52 & 0b11111110;
-                    mmu.set_raw_byte(0xFF26, new_val);
-                    println!("DISABLING CHANNEL 1", );
-                    println!("NR52: 0b{:08b}", new_val);
+                    self.disable_channel(1, mmu);
                 }
             }
         }
@@ -71,11 +65,7 @@ impl APU {
             if length_enabled {
                 self.square2_length_counter -= 1;
                 if self.square2_length_counter == 0 {
-                    // disable the channel
-                    let nr52 = mmu.get_raw_byte(0xFF26);
-                    let new_val = nr52 & 0b11111101;
-                    mmu.set_raw_byte(0xFF26, new_val);
-                    println!("DISABLING CHANNEL 2");
+                    self.disable_channel(2, mmu);
                 }
             }
         }
@@ -87,11 +77,7 @@ impl APU {
             if length_enabled {
                 self.wave_length_counter -= 1;
                 if self.wave_length_counter == 0 {
-                    // disable the channel
-                    let nr52 = mmu.get_raw_byte(0xFF26);
-                    let new_val = nr52 & 0b11111011;
-                    mmu.set_raw_byte(0xFF26, new_val);
-                    println!("DISABLING CHANNEL 3");
+                    self.disable_channel(3, mmu);
                 }
             }
         }
@@ -103,11 +89,7 @@ impl APU {
             if length_enabled {
                 self.noise_length_counter -= 1;
                 if self.noise_length_counter == 0 {
-                    // disable the channel
-                    let nr52 = mmu.get_raw_byte(0xFF26);
-                    let new_val = nr52 & 0b11110111;
-                    mmu.set_raw_byte(0xFF26, new_val);
-                    println!("DISABLING CHANNEL 4");
+                    self.disable_channel(4, mmu);
                 }
             }
         }
@@ -121,102 +103,141 @@ impl APU {
             mmu.nr11_written = false;
             let nr11 = mmu.get_raw_byte(0xFF11);
             self.square1_length_counter = 64 - (nr11 & 0x3F);
-            println!("RESETTING CHANNEL 1");
         }
         if mmu.nr21_written {
             mmu.nr21_written = false;
             let nr21 = mmu.get_raw_byte(0xFF16);
             self.square2_length_counter = 64 - (nr21 & 0x3F);
-            println!("RESETTING CHANNEL 2");
+            //println!("RESETTING CHANNEL 2");
         }
         if mmu.nr31_written {
             mmu.nr31_written = false;
             let nr31 = mmu.get_raw_byte(0xFF1B);
             self.wave_length_counter = 64 - (nr31 & 0x3F);
-            println!("RESETTING CHANNEL 3");
+            //println!("RESETTING CHANNEL 3");
         }
         if mmu.nr41_written {
             mmu.nr41_written = false;
             let nr41 = mmu.get_raw_byte(0xFF20);
             self.noise_length_counter = 64 - (nr41 & 0x3F);
-            println!("RESETTING CHANNEL 4");
+            //println!("RESETTING CHANNEL 4");
         }
 
 
         let nr14 = mmu.get_raw_byte(0xFF14);
-        if (nr14 & 0x80) != 0 {
-            // Clear trigger bit (it's write-only, should read as 0)
-            //mmu.set_raw_byte(0xFF14, nr14 & !0x80);
+        //println!("NR14: 0b{:08b}", nr14);
+        if ((nr14 & 0x80) != 0) && (mmu.nr14_written) {
 
-            // Handle trigger
-            let nr11 = mmu.get_raw_byte(0xFF11);
-            self.square1_length_counter = 64 - (nr11 & 0x3F);
+            // check DAC
+            let nr12 = mmu.get_raw_byte(0xFF12);
+            let dac_enabled = (nr12 & 0xF8) != 0;
+            if dac_enabled {
+                // Clear trigger bit (it's write-only, should read as 0)
+                mmu.set_raw_byte(0xFF14, nr14 & !0x80);
 
-            let nr13 = mmu.get_raw_byte(0xFF13);
-            let frequency = nr13 as u16 | ((nr14 as u16 & 0x07) << 8);
-            if frequency == 0 {
-                return;
+                // Handle trigger
+                let nr11 = mmu.get_raw_byte(0xFF11);
+                self.square1_length_counter = 64 - (nr11 & 0x3F);
+
+                /*
+                let nr13 = mmu.get_raw_byte(0xFF13);
+                let frequency = nr13 as u16 | ((nr14 as u16 & 0x07) << 8);
+                if frequency == 0 {
+                    return;
+                }
+                */
+
+
+                // Enable channel in NR52
+                let nr52 = mmu.get_raw_byte(0xFF26);
+                //println!("TRIGGERING CHANNEL 1");
+                mmu.set_raw_byte(0xFF26, nr52 | 0b00000001);
             }
-
-            
-            // Enable channel in NR52
-            let nr52 = mmu.get_raw_byte(0xFF26);
-            mmu.set_raw_byte(0xFF26, nr52 | 0b00000001);
         }
+        mmu.nr14_written = false;
 
-        let nr24 = mmu.get_raw_byte(0xFF24);
-        if (nr24 & 0x80) != 0 {
-            // Clear trigger bit (it's write-only, should read as 0)
-            //mmu.set_raw_byte(0xFF24, nr24 & !0x80);
+        let nr24 = mmu.get_raw_byte(0xFF19);
+        //println!("NR24: 0b{:08b}", nr24);
+        if ((nr24 & 0x80) != 0) && (mmu.nr24_written) {
 
-            // Handle trigger
-            let nr21 = mmu.get_raw_byte(0xFF16);
-            self.square2_length_counter = 64 - (nr21 & 0x3F);
+            // check DAC
+            let nr22 = mmu.get_raw_byte(0xFF17);
+            let dac_enabled = (nr22 & 0xF8) != 0;
+            if dac_enabled {
+                // Clear trigger bit (it's write-only, should read as 0)
+                mmu.set_raw_byte(0xFF19, nr24 & !0x80);
+                //println!("WRITING TO NR24... POST VAL: 0b{:08b}", mmu.get_raw_byte(0xFF19));
 
-            let nr23 = mmu.get_raw_byte(0xFF18);
-            let frequency = nr23 as u16 | ((nr24 as u16 & 0x07) << 8);
-            if frequency == 0 {
-                return;
+                // Handle trigger
+                let nr21 = mmu.get_raw_byte(0xFF16);
+                self.square2_length_counter = 64 - (nr21 & 0x3F);
+
+                /*
+                let nr23 = mmu.get_raw_byte(0xFF18);
+                let frequency = nr23 as u16 | ((nr24 as u16 & 0x07) << 8);
+                if frequency == 0 {
+                    return;
+                }
+                */
+
+                // Enable channel in NR52
+                let nr52 = mmu.get_raw_byte(0xFF26);
+                mmu.set_raw_byte(0xFF26, nr52 | 0b00000010);
             }
-            
-            // Enable channel in NR52
-            let nr52 = mmu.get_raw_byte(0xFF26);
-            mmu.set_raw_byte(0xFF26, nr52 | 0b00000010);
         }
+        mmu.nr24_written = false;
 
         let nr34 = mmu.get_raw_byte(0xFF1E);
-        if (nr34 & 0x80) != 0 {
-            // Clear trigger bit (it's write-only, should read as 0)
-            //mmu.set_raw_byte(0xFF1E, nr34 & !0x80);
+        //println!("NR34: 0b{:08b}", nr34);
+        if ((nr34 & 0x80) != 0) && (mmu.nr34_written) {
 
-            // Handle trigger
-            let nr31 = mmu.get_raw_byte(0xFF1B);
-            self.wave_length_counter = 64 - (nr31 & 0x3F);
+            // check DAC
+            let nr30 = mmu.get_raw_byte(0xFF1A);
+            let dac_enabled = (nr30 & 0x80) != 0;
+            if dac_enabled {
+                // Clear trigger bit (it's write-only, should read as 0)
+                mmu.set_raw_byte(0xFF1E, nr34 & !0x80);
 
-            let nr33 = mmu.get_raw_byte(0xFF1D);
-            let frequency = nr33 as u16 | ((nr34 as u16 & 0x07) << 8);
-            if frequency == 0 {
-                return;
+                // Handle trigger
+                let nr31 = mmu.get_raw_byte(0xFF1B);
+                self.wave_length_counter = 64 - (nr31 & 0x3F);
+
+                /*
+                let nr33 = mmu.get_raw_byte(0xFF1D);
+                let frequency = nr33 as u16 | ((nr34 as u16 & 0x07) << 8);
+                if frequency == 0 {
+                    return;
+                }
+                */
+
+                // Enable channel in NR52
+                let nr52 = mmu.get_raw_byte(0xFF26);
+                mmu.set_raw_byte(0xFF26, nr52 | 0b00000100);
             }
-            
-            // Enable channel in NR52
-            let nr52 = mmu.get_raw_byte(0xFF26);
-            mmu.set_raw_byte(0xFF26, nr52 | 0b00000100);
         }
+        mmu.nr34_written = false;
 
         let nr44 = mmu.get_raw_byte(0xFF23);
-        if (nr44 & 0x80) != 0 {
-            // Clear trigger bit (it's write-only, should read as 0)
-            //mmu.set_raw_byte(0xFF23, nr44 & !0x80);
+        //println!("NR44: 0b{:08b}", nr44);
+        if ((nr44 & 0x80) != 0) && (mmu.nr44_written) {
 
-            // Handle trigger
-            let nr41 = mmu.get_raw_byte(0xFF20);
-            self.noise_length_counter = 64 - (nr41 & 0x3F);
-            
-            // Enable channel in NR52
-            let nr52 = mmu.get_raw_byte(0xFF26);
-            mmu.set_raw_byte(0xFF26, nr52 | 0b00001000);
+            // check DAC
+            let nr42 = mmu.get_raw_byte(0xFF21);
+            let dac_enabled = (nr42 & 0xF8) != 0;
+            if dac_enabled {
+                // Clear trigger bit (it's write-only, should read as 0)
+                mmu.set_raw_byte(0xFF23, nr44 & !0x80);
+
+                // Handle trigger
+                let nr41 = mmu.get_raw_byte(0xFF20);
+                self.noise_length_counter = 64 - (nr41 & 0x3F);
+
+                // Enable channel in NR52
+                let nr52 = mmu.get_raw_byte(0xFF26);
+                mmu.set_raw_byte(0xFF26, nr52 | 0b00001000);
+            }
         }
+        mmu.nr44_written = false;
     }
 
 
@@ -337,7 +358,6 @@ impl APU {
         let enabled = (mmu_ref.get_byte(0xFF26 as usize) & 0b10000000) != 0;
 
         if (!enabled) && (self.master_audio_enabled) {
-            println!("CLEARING APU REGS");
             for addr in 0xFF10..0xFF26 {
                 mmu_ref.set_raw_byte(addr as usize, 0);
             }
@@ -353,6 +373,51 @@ impl APU {
         return val;
     }
 
+    pub fn disable_channel(&mut self, channel : u8, mmu_ref : &mut mmu::MMU) {
+        // NOTE: channel is one-indexed. Starts at 1.
+        assert!(channel >= 1);
+        assert!(channel <= 4);
+        let mask_val : u8 = 1 << (channel - 1);
+        let nr52 = mmu_ref.get_raw_byte(0xFF26);
+        let new_val = nr52 & (!mask_val);
+        mmu_ref.set_raw_byte(0xFF26, new_val);
+    }
+
+    pub fn check_dac_disabled(&mut self, mmu_ref : &mut mmu::MMU) {
+        if mmu_ref.nr12_written {
+            mmu_ref.nr12_written = false;
+            let nr12 = mmu_ref.get_raw_byte(0xFF12);
+            let dac_enabled = (nr12 & 0xF8) != 0;
+            if !dac_enabled {
+                self.disable_channel(1, mmu_ref);
+            }
+        }
+        if mmu_ref.nr22_written {
+            mmu_ref.nr22_written = false;
+            let nr22 = mmu_ref.get_raw_byte(0xFF17);
+            let dac_enabled = (nr22 & 0xF8) != 0;
+            if !dac_enabled {
+                self.disable_channel(2, mmu_ref);
+            }
+        }
+        if mmu_ref.nr30_written {
+            mmu_ref.nr30_written = false;
+            let nr30 = mmu_ref.get_raw_byte(0xFF1A);
+            let dac_enabled = (nr30 & 0x80) != 0;
+            if !dac_enabled {
+                self.disable_channel(3, mmu_ref);
+            }
+        }
+        if mmu_ref.nr42_written {
+            mmu_ref.nr42_written = false;
+            let nr42 = mmu_ref.get_raw_byte(0xFF21);
+            let dac_enabled = (nr42 & 0xF8) != 0;
+            if !dac_enabled {
+                self.disable_channel(4, mmu_ref);
+            }
+        }
+    }
+
 
     pub fn cycle(&mut self, t_cycles: u8, mmu_ref : &mut mmu::MMU) {
         self.accumulated_cycles = self.accumulated_cycles.wrapping_add(t_cycles as u16);
@@ -361,17 +426,21 @@ impl APU {
         if !self.master_audio_enabled {
             return;
         }
-
-        self.check_triggers(mmu_ref);
-
         if self.div_apu_increment(mmu_ref) {
             self.step = (self.step + 1) % 8;
 
             // TODO do the other things we need to do
+            //self.update_length_counters(mmu_ref);
             if (self.step % 2) == 0 {
                 self.update_length_counters(mmu_ref);
+
             }
         }
+
+        self.check_dac_disabled(mmu_ref);
+
+        self.check_triggers(mmu_ref);
+
 
         const CYCLES_PER_SAMPLE: u16 = 91;
         

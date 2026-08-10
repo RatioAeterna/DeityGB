@@ -25,13 +25,24 @@
 	    cargo
             rustup
 	    rustfmt
-	    alsaLib
-	    xorg.libX11
-	    xorg.libXcursor
-	    xorg.libXrandr
-	    xorg.libXi
-	    libxkbcommon
+	    #alsaLib
+	    #xorg.libX11
+	    #xorg.libXcursor
+	    #xorg.libXrandr
+	    #xorg.libXi
+	    #libxkbcommon
+	    libiconv
             # Add other essential Rust tools as needed
+          ];
+	  nativeBuildInputs = with pkgs.darwin.apple_sdk.frameworks; [
+	    Foundation
+	    AppKit
+	    CoreGraphics
+	    Metal
+	    MetalKit
+	    ImageIO
+	    Vision
+	    AVFoundation
           ];
         };
       }

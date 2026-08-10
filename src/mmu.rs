@@ -9,6 +9,25 @@ struct MBC1 {
     banking_mode : u8,
 }
 
+#[derive(Clone)]
+struct MBC3 {
+    ram_enabled: bool,
+    rom_bank: u8,
+    ram_bank: u8,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum JoypadButton {
+    Right,
+    Left,
+    Up,
+    Down,
+    A,
+    B,
+    Select,
+    Start,
+}
+
 
 #[derive(Clone)]
 pub struct MMU {
@@ -52,12 +71,15 @@ pub struct MMU {
         pub oam_banned : bool,
 
         pub joypad_state : u8,
+        joypad_buttons: u8,
+        joypad_dpad: u8,
 
         pub cartridge_type_code : u8,
         pub rom_banks : usize,
         pub ram_banks : usize,
 
         pub mbc1 : MBC1,
+        mbc3: MBC3,
 
         pub last_input_dpad : bool,
 
@@ -69,7 +91,22 @@ pub struct MMU {
         pub nr31_written : bool,
         pub nr41_written : bool,
 
+        // DAC-relevant registers
+        pub nr12_written : bool,
+        pub nr22_written : bool,
+        pub nr30_written : bool,
+        pub nr42_written : bool,
+
+        // trigger registers (we only trigger on WRITES to these
+        // when the trigger bit is set)
+        pub nr14_written : bool,
+        pub nr24_written : bool,
+        pub nr34_written : bool,
+        pub nr44_written : bool,
+
         pub div_apu_increment_flag : bool,
+
+        serial_output : Vec<u8>,
 }
 
 fn echo_ram_sub(addr: usize) -> usize {
@@ -94,8 +131,11 @@ impl MMU {
             vram_banned : false,
             oam_banned : false,
             joypad_state : 0xCF,
+            joypad_buttons: 0x0F,
+            joypad_dpad: 0x0F,
             cartridge_type_code : 0x00,
             mbc1 : MBC1 { ram_enabled : false, rom_bank : 1, ram_bank : 0, banking_mode : 0 },
+            mbc3: MBC3 { ram_enabled: false, rom_bank: 1, ram_bank: 0 },
             rom_banks : 0,
             ram_banks : 0,
 
@@ -108,7 +148,18 @@ impl MMU {
             nr31_written : false,
             nr41_written : false,
 
+            nr12_written : false,
+            nr22_written : false,
+            nr30_written : false,
+            nr42_written : false,
+
+            nr14_written : false,
+            nr24_written : false,
+            nr34_written : false,
+            nr44_written : false,
+
             div_apu_increment_flag : false,
+            serial_output : Vec::new(),
         }
     }
 
@@ -137,7 +188,6 @@ impl MMU {
             0xFF26 => { // NR52
                 let master_enable = data & 0x80; // only writeable bit
                 let current_status = self.memory[addr] & 0x0F; // keep channel status bits
-                println!("WRITING TO NR52: 0b{:08b}", master_enable | current_status);
                 master_enable | current_status
             },
             0xFF11 => {
@@ -154,6 +204,39 @@ impl MMU {
             },
             0xFF20 => {
                 self.nr41_written = true;
+                data
+            },
+            // possibly writing to DAC
+            0xFF12 => {
+                self.nr12_written = true;
+                data
+            },
+            0xFF17 => {
+                self.nr22_written = true;
+                data
+            },
+            0xFF1A => {
+                self.nr30_written = true;
+                data
+            },
+            0xFF21 => {
+                self.nr42_written = true;
+                data
+            },
+            0xFF14 => {
+                self.nr14_written = true;
+                data
+            },
+            0xFF19 => {
+                self.nr24_written = true;
+                data
+            },
+            0xFF1E => {
+                self.nr34_written = true;
+                data
+            },
+            0xFF23 => {
+                self.nr44_written = true;
                 data
             },
             _ => data,
@@ -232,6 +315,44 @@ impl MMU {
         self.joypad_state = data;
     }
 
+    fn read_joypad(&self) -> u8 {
+        let mut value = 0xC0 | (self.joypad_state & 0x30) | 0x0F;
+        if value & 0x10 == 0 {
+            value &= 0xF0 | self.joypad_dpad;
+        }
+        if value & 0x20 == 0 {
+            value &= 0xF0 | self.joypad_buttons;
+        }
+        value
+    }
+
+    fn request_joypad_interrupt_on_falling_edge(&mut self, previous: u8) {
+        let current = self.read_joypad();
+        if (previous & !current & 0x0F) != 0 {
+            self.memory[0xFF0F] |= 0x10;
+        }
+    }
+
+    pub fn set_joypad_button(&mut self, button: JoypadButton, pressed: bool) {
+        let previous = self.read_joypad();
+        let (state, bit) = match button {
+            JoypadButton::Right => (&mut self.joypad_dpad, 0),
+            JoypadButton::Left => (&mut self.joypad_dpad, 1),
+            JoypadButton::Up => (&mut self.joypad_dpad, 2),
+            JoypadButton::Down => (&mut self.joypad_dpad, 3),
+            JoypadButton::A => (&mut self.joypad_buttons, 0),
+            JoypadButton::B => (&mut self.joypad_buttons, 1),
+            JoypadButton::Select => (&mut self.joypad_buttons, 2),
+            JoypadButton::Start => (&mut self.joypad_buttons, 3),
+        };
+        if pressed {
+            *state &= !(1 << bit);
+        } else {
+            *state |= 1 << bit;
+        }
+        self.request_joypad_interrupt_on_falling_edge(previous);
+    }
+
 
     fn get_rom_bank_mask(&self) -> u8 {
         match self.rom_banks {
@@ -241,6 +362,14 @@ impl MMU {
             16 => 0x0F,
             _ => 0x1F,
         }
+    }
+
+    fn is_mbc1(&self) -> bool {
+        matches!(self.cartridge_type_code, 0x01..=0x03)
+    }
+
+    fn is_mbc3(&self) -> bool {
+        matches!(self.cartridge_type_code, 0x0F..=0x13)
     }
     
     fn compute_zero_bank_number(&self) -> u8 {
@@ -262,11 +391,11 @@ impl MMU {
     }
 
     fn compute_high_bank_number(&self) -> u8 {
-        if self.rom_banks <= 32 {
-            return self.mbc1.rom_bank & self.get_rom_bank_mask();
+        let base = self.mbc1.rom_bank & self.get_rom_bank_mask();
+        if self.rom_banks <= 32 || self.mbc1.banking_mode == 1 {
+            return base;
         }
         if self.rom_banks == 64 {
-            let base = self.mbc1.rom_bank & self.get_rom_bank_mask();
             let bit = self.mbc1.ram_bank & 0b1;
             if bit == 0 {
                 return base & 0b11011111;
@@ -276,7 +405,7 @@ impl MMU {
             }
         }
         if self.rom_banks == 128 {
-            let mut base = self.mbc1.rom_bank & self.get_rom_bank_mask();
+            let mut base = base;
             let ram_bank = self.mbc1.ram_bank << 5;
             base &= 0b10011111;
             base |= ram_bank;
@@ -287,9 +416,31 @@ impl MMU {
         }
     }
 
+    pub fn mapped_rom_bank(&self, addr: u16) -> u8 {
+        if self.is_mbc3() {
+            return if addr < 0x4000 { 0 } else if addr < 0x8000 { self.mbc3.rom_bank } else { 0 };
+        }
+        if addr < 0x4000 {
+            if self.mbc1.banking_mode == 0 {
+                0
+            } else {
+                self.compute_zero_bank_number()
+            }
+        } else if addr < 0x8000 {
+            self.compute_high_bank_number()
+        } else {
+            0
+        }
+    }
+
     fn read_external_ram(&self, mut addr: usize) -> u8 {
         //println!("READING FROM RAM");
-        if !self.mbc1.ram_enabled {
+        let ram_enabled = if self.is_mbc3() { self.mbc3.ram_enabled } else { self.mbc1.ram_enabled };
+        let ram_bank = if self.is_mbc3() { self.mbc3.ram_bank } else { self.mbc1.ram_bank };
+        if !ram_enabled {
+            return 0xFF;
+        }
+        if self.is_mbc3() && ram_bank > 3 {
             return 0xFF;
         }
         if self.ram_size == 0 {
@@ -300,12 +451,12 @@ impl MMU {
             return self.external_ram[addr];
         }
         if (self.ram_size == (4 * 8192)) {
-            if self.mbc1.banking_mode == 0 {
+            if self.is_mbc1() && self.mbc1.banking_mode == 0 {
                 addr = (addr - 0xA000);
                 return self.external_ram[addr];
             }
             else {
-                addr = 0x2000 * (self.mbc1.ram_bank as usize) + (addr - 0xA000);
+                addr = 0x2000 * (ram_bank as usize) + (addr - 0xA000);
                 //println!("READING FROM RAM IN MODE 1");
                 return self.external_ram[addr];
             }
@@ -318,7 +469,12 @@ impl MMU {
 
     fn write_external_ram(&mut self, mut addr: usize, data : u8) {
         //println!("WRITING TO RAM");
-        if !self.mbc1.ram_enabled {
+        let ram_enabled = if self.is_mbc3() { self.mbc3.ram_enabled } else { self.mbc1.ram_enabled };
+        let ram_bank = if self.is_mbc3() { self.mbc3.ram_bank } else { self.mbc1.ram_bank };
+        if !ram_enabled {
+            return;
+        }
+        if self.is_mbc3() && ram_bank > 3 {
             return;
         }
         if self.ram_size == 0 {
@@ -330,13 +486,13 @@ impl MMU {
             return;
         }
         if (self.ram_size == (4 * 8192)) {
-            if self.mbc1.banking_mode == 0 {
+            if self.is_mbc1() && self.mbc1.banking_mode == 0 {
                 addr = (addr - 0xA000);
                 self.external_ram[addr] = data;
                 return;
             }
             else {
-                addr = 0x2000 * (self.mbc1.ram_bank as usize) + (addr - 0xA000);
+                addr = 0x2000 * (ram_bank as usize) + (addr - 0xA000);
                 self.external_ram[addr] = data;
                 //println!("WRITING TO RAM IN MODE 1");
                 return;
@@ -367,7 +523,23 @@ impl MMU {
         */
 
         if addr == 0xFF01 {
-            println!("SERIAL: {}", data);
+            self.memory[addr] = data;
+            return;
+        }
+
+        if addr == 0xFF02 {
+            self.memory[addr] = data;
+            let transfer_requested = (data & 0x80) != 0;
+            let internal_clock = (data & 0x01) != 0;
+            if transfer_requested && internal_clock {
+                let outbound = self.memory[0xFF01];
+                self.serial_output.push(outbound);
+                self.memory[0xFF01] = 0xFF;
+                self.memory[0xFF02] = data & !0x80;
+                let interrupt_flags = self.get_if() | 0b0000_1000;
+                self.set_if(interrupt_flags);
+            }
+            return;
         }
 
 
@@ -387,15 +559,28 @@ impl MMU {
         }
 
         if addr == 0xFF00 {
-            self.joypad_state = (data & 0xF0) | (self.joypad_state & 0x0F);
-            //println!("WRITING: 0b{:08b}", self.joypad_state);
+            let previous = self.read_joypad();
+            self.joypad_state = 0xC0 | (data & 0x30) | 0x0F;
+            self.request_joypad_interrupt_on_falling_edge(previous);
+            return;
+        }
+
+        // Any non-zero write permanently unmaps the boot ROM until a hardware reset.
+        if addr == 0xFF50 {
+            if self.memory[0xFF50] == 0 && data != 0 {
+                // Preserve DeityGB's established post-boot sentinel. Some existing
+                // game paths observe this register even though the boot ROM is
+                // already permanently unmapped.
+                self.memory[0xFF50] = 10;
+            }
+            return;
         }
 
 
-        if (self.cartridge_type_code != 0) && (addr >= 0x00) && (addr <= 0x1FFF) {
+        if self.is_mbc1() && addr <= 0x1FFF {
             self.mbc1.ram_enabled = (data & 0x0F) == 0x0A;
         }
-        if (self.cartridge_type_code != 0) && (addr >= 0x2000) && (addr <= 0x3FFF) {
+        if self.is_mbc1() && (addr >= 0x2000) && (addr <= 0x3FFF) {
             // restrict to only 5 bit register
             let actual_data = data & 0b00011111;
 
@@ -407,21 +592,35 @@ impl MMU {
                 //self.mbc1.rom_bank = if masked == 0 { 1 } else { masked };
             }
         }
-        if (self.cartridge_type_code != 0) && (addr >= 0x4000) && (addr <= 0x5FFF) {
+        if self.is_mbc1() && (addr >= 0x4000) && (addr <= 0x5FFF) {
             self.mbc1.ram_bank = data & 0b00000011;
         }
 
-        if (self.cartridge_type_code != 0) && (addr >= 0x6000) && (addr <= 0x7FFF) {
+        if self.is_mbc1() && (addr >= 0x6000) && (addr <= 0x7FFF) {
             self.mbc1.banking_mode = data & 0b1;
         }
 
-        if (self.cartridge_type_code != 0) && (addr >= 0xA000) && (addr <= 0xBFFF) {
+        if self.is_mbc3() && addr <= 0x1FFF {
+            self.mbc3.ram_enabled = (data & 0x0F) == 0x0A;
+        }
+        if self.is_mbc3() && (0x2000..=0x3FFF).contains(&addr) {
+            let bank = data & 0x7F;
+            self.mbc3.rom_bank = if bank == 0 { 1 } else { bank % self.rom_banks as u8 };
+            if self.mbc3.rom_bank == 0 {
+                self.mbc3.rom_bank = 1;
+            }
+        }
+        if self.is_mbc3() && (0x4000..=0x5FFF).contains(&addr) {
+            self.mbc3.ram_bank = data;
+        }
+        // MBC3 RTC latching (6000-7FFF) is not needed for ROM/RAM banking.
+
+        if (self.is_mbc1() || self.is_mbc3()) && (addr >= 0xA000) && (addr <= 0xBFFF) {
             self.write_external_ram(addr, data);
         }
 
 
         if addr == 0xFF05 {
-            println!("WRITING TO TIMA: {}", data);
         }
 
         // catch-all for writes to ROM (both valid and invalid)
@@ -431,7 +630,6 @@ impl MMU {
         }
 
         if self.is_cgb_register(addr) {
-            println!("FORBIDDEN. VAL {}", data);
             return;
         }
 
@@ -490,7 +688,7 @@ impl MMU {
         return self.div_internal;
     }
 
-    // check if we have we set the 'BOOT' reg, i.e., at the end of the boot sequence
+    // Non-zero means the boot ROM has been permanently unmapped.
     pub fn get_boot(&self) -> u8 {
         self.memory[0xFF50]
     }
@@ -531,7 +729,11 @@ impl MMU {
             return 0xFF;
         }
     
-        if (self.cartridge_type_code != 0) && (addr >= 0x0000) && (addr <= 0x3FFF) {
+        if self.is_mbc3() && addr <= 0x3FFF {
+            return self.rom_data[addr];
+        }
+
+        if self.is_mbc1() && addr <= 0x3FFF {
             if self.mbc1.banking_mode == 0 {
                 return self.rom_data[addr];
             }
@@ -542,37 +744,24 @@ impl MMU {
             }
         }
 
-        if (self.cartridge_type_code != 0) && (addr >= 0x4000) && (addr <= 0x7FFF) {
-            let high_bank_number = self.compute_high_bank_number();
+        if (self.is_mbc1() || self.is_mbc3()) && (addr >= 0x4000) && (addr <= 0x7FFF) {
+            let high_bank_number = if self.is_mbc3() { self.mbc3.rom_bank } else { self.compute_high_bank_number() };
             //println!("HIGH BANK NUMBER {}", high_bank_number);
             let bank_offset = high_bank_number as usize * 0x4000;
             return self.rom_data[bank_offset + (addr - 0x4000) as usize]
         }
 
-        if (self.cartridge_type_code != 0) && (addr >= 0xA000) && (addr <= 0xBFFF) {
+        if (self.is_mbc1() || self.is_mbc3()) && (addr >= 0xA000) && (addr <= 0xBFFF) {
             return self.read_external_ram(addr);
         }
 
 
         if addr == 0xFF00 {
-            /*
-            if self.last_input_dpad {
-                println!("DPAD");
-                println!("0b{:08b}", self.joypad_state | 0b00100000);
-                return self.joypad_state | 0b00100000;
-            }
-            else {
-                println!("BUTTON");
-                println!("0b{:08b}", self.joypad_state | 0b00010000);
-                return self.joypad_state | 0b00010000;
-            }
-            */
-            return self.joypad_state;
+            return self.read_joypad();
         }
         
         if addr == 0xFF01 {
-            return 0xFF;
-            // serial comms
+            return self.memory[addr];
         }
 
         if self.vram_banned && (addr >= 0x8000) && (addr <= 0x9FFF) {
@@ -604,6 +793,14 @@ impl MMU {
 
     pub fn set_if(&mut self, new_val : u8) {
         self.memory[0xFF0F] = new_val;
+    }
+
+    pub fn serial_output(&self) -> &[u8] {
+        &self.serial_output
+    }
+
+    pub fn drain_serial_output(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.serial_output)
     }
 
     pub fn map_cartridge_nintendo_logo(&mut self) {
@@ -642,12 +839,7 @@ impl MMU {
         let ram_size_code = rom_data[0x0149];
 
 
-        let do_we_even_use_ram = match self.cartridge_type_code {
-            0x00 => false, // cartridge only
-            0x01 => false, // base MBC1
-            0x02 => true, // MBC1 with RAM
-            _ => true,
-        };
+        let do_we_even_use_ram = matches!(self.cartridge_type_code, 0x02 | 0x03 | 0x10 | 0x12 | 0x13);
 
         self.rom_banks = match rom_size_code {
             0x00 => 2,    
@@ -673,7 +865,7 @@ impl MMU {
             };
 
             self.ram_size = match ram_size_code {
-                0x00 => 2048,    
+                0x00 => 2048,
                 0x02 => 8192,
                 0x03 => 4*8192,
                 0x04 => 16*8192,

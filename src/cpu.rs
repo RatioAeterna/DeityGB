@@ -514,6 +514,9 @@ pub struct CPU {
         // debugging
         trace_enabled: bool,
 
+        halt_bug_enabled: bool,
+        halt_bug_stuck_pc: u16,
+
         dis : Disassembler,
 
 }
@@ -535,8 +538,30 @@ impl CPU  {
                 ei_pending : false,
                 di_pending : false,
                 trace_enabled: false,
+                halt_bug_enabled: false,
+                halt_bug_stuck_pc: 0,
                 dis : Disassembler::from_csv(),
         }
+    }
+
+    pub fn set_trace_enabled(&mut self, enabled: bool) {
+        self.trace_enabled = enabled;
+    }
+
+    pub fn program_counter(&self) -> u16 {
+        self.pc
+    }
+
+    pub fn accumulator(&self) -> u8 {
+        self.a
+    }
+
+    pub fn stack_pointer(&self) -> u16 {
+        self.get_sp()
+    }
+
+    pub fn hl(&self) -> u16 {
+        self.get_hl()
     }
 
     fn reg_val(self, reg : &u8) -> u8 {
@@ -692,7 +717,7 @@ impl CPU  {
         next_opcode = self.fetch(self.pc, mmu_ref);
 
         // disassemble and print the instruction we're looking at, for debugging purposes
-        if true {
+        if self.trace_enabled {
             let nn = self.next_word(self.pc+1, mmu_ref);
             let n = self.fetch(self.pc+1, mmu_ref);
 
@@ -705,20 +730,32 @@ impl CPU  {
         // TODO handle all halt cases, especially also exiting on reset.
         // Extremely jank copy/pasting code right now, will clean up later.
         if self.halt_flag {
-            /*
-            println!("HALTED");
-            println!("IME: {}", self.ime);
-            println!("IE: {:08b}", mmu_ref.get_byte(0xFFFF as usize));
-            println!("IF: {:08b}", mmu_ref.get_byte(0xFF0F as usize));
-            */
-            cycles = 4;
-            // we do not care about IME here
             let mut ie_reg = mmu_ref.get_ie();
             let mut if_reg = mmu_ref.get_if();
-            for i in 0..5 {
-                let mask = 1 << i;
-                if (ie_reg & mask) != 0 && (if_reg & mask) != 0 {
-                    self.halt_flag = false;
+
+            // HALT BUG
+            //if (!self.ime) && ((ie_reg & if_reg) != 0) {
+            if false {
+                // fetch the next instruction, do not increment PC
+                self.halt_flag = false;
+                self.halt_bug_enabled = true;
+                //self.halt_bug_stuck_pc = self.pc;
+                println!("HALTED");
+                println!("IME: {}", self.ime);
+                println!("IE: {:08b}", mmu_ref.get_byte(0xFFFF as usize));
+                println!("IF: {:08b}", mmu_ref.get_byte(0xFF0F as usize));
+
+                // we need to keep going
+                //cycles = self.decode_execute(next_opcode, mmu_ref, cb_prefix);
+            }
+            else {
+                cycles = 4;
+                // we do not care about IME here
+                for i in 0..5 {
+                    let mask = 1 << i;
+                    if (ie_reg & mask) != 0 && (if_reg & mask) != 0 {
+                        self.halt_flag = false;
+                    }
                 }
             }
         }
@@ -792,6 +829,13 @@ impl CPU  {
                         skip_increment = true;
 
                         self.ime = false;  
+
+                        if self.halt_bug_enabled {
+                            println!("INTERRUPT DURING HALT BUG!");
+                            self.halt_bug_enabled = false;
+                            self.halt_bug_stuck_pc = 0;
+                        }
+
                         return cycles;
                     }
                 }
@@ -1629,18 +1673,16 @@ impl CPU  {
     }
 
 
-    if !skip_increment {
+    if !skip_increment && !self.halt_bug_enabled {
         self.pc += instruction_size as u16;
     }
-
-    if (mmu_ref.get_boot() == 1) {
-        self.pc = 0x0100;
-        println!("BOOT ROM DONE");
-        // TODO this is a dirty hack. Get a boolean flag or something like that at a minimum
-        mmu_ref.set_byte(0xFF50 as usize, 10);
+    //if self.pc != self.halt_bug_stuck_pc {
+    if self.halt_bug_enabled {
+        self.halt_bug_enabled = false;
+        self.halt_bug_stuck_pc = 0;
     }
 
-    if ((mmu_ref.get_byte(0xFF50 as usize) == 10) && self.trace_enabled) {
+    if mmu_ref.get_boot() != 0 && self.trace_enabled {
         log_line(&format!(
             "A:{:02X} F:{:02X} B:{:02X} C:{:02X} D:{:02X} E:{:02X} H:{:02X} L:{:02X} SP:{:04X} PC:{:04X} PCMEM:{:02X},{:02X},{:02X},{:02X}",
             self.a, self.f, self.b, self.c, self.d, self.e, self.h, self.l, self.get_sp(), self.pc,
@@ -1661,14 +1703,3 @@ impl CPU  {
     cycles
     }
 }
-
-
-
-
-
-
-
-
-
-
-
