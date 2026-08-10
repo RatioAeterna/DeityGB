@@ -564,6 +564,18 @@ impl CPU  {
         self.get_hl()
     }
 
+    pub fn de(&self) -> u16 {
+        self.get_de()
+    }
+
+    pub fn is_halted(&self) -> bool {
+        self.halt_flag
+    }
+
+    pub fn interrupts_enabled(&self) -> bool {
+        self.ime
+    }
+
     fn reg_val(self, reg : &u8) -> u8 {
             return *reg;
     }
@@ -700,11 +712,48 @@ impl CPU  {
         // write to TMA on the same cycle that you overflow TIMA
     }
 
+    fn service_interrupt(&mut self, pending_interrupts: u8, mmu_ref: &mut mmu::MMU) -> u8 {
+        let interrupt_vectors = [0x40, 0x48, 0x50, 0x58, 0x60];
+        let interrupt = (0..5)
+            .find(|bit| pending_interrupts & (1 << bit) != 0)
+            .expect("service_interrupt requires a pending interrupt");
+        let mask = 1 << interrupt;
+
+        let interrupt_flags = mmu_ref.get_if();
+        mmu_ref.set_if(interrupt_flags & !mask);
+        self.ime = false;
+        self.set_sp(self.get_sp().wrapping_sub(1));
+        mmu_ref.set_byte(self.get_sp() as usize, (self.pc >> 8) as u8);
+        self.set_sp(self.get_sp().wrapping_sub(1));
+        mmu_ref.set_byte(self.get_sp() as usize, (self.pc & 0xFF) as u8);
+        self.pc = interrupt_vectors[interrupt];
+        self.halt_bug_enabled = false;
+        self.halt_bug_stuck_pc = 0;
+
+        20
+    }
+
 
     // performs a F/D/E/WB cycle
     pub fn cycle(&mut self, mmu_ref : &mut mmu::MMU) -> u8 {
         if self.stop_flag {
             return 0;
+        }
+
+        let pending_interrupts = mmu_ref.get_ie() & mmu_ref.get_if() & 0x1F;
+        if self.halt_flag {
+            if pending_interrupts == 0 {
+                let cycles = 4;
+                self.update_timers(cycles, mmu_ref);
+                return cycles;
+            }
+            self.halt_flag = false;
+        }
+
+        if self.ime && pending_interrupts != 0 {
+            let cycles = self.service_interrupt(pending_interrupts, mmu_ref);
+            self.update_timers(cycles, mmu_ref);
+            return cycles;
         }
 
         let next_opcode : u8; 
@@ -725,44 +774,8 @@ impl CPU  {
             println!("[{:#04X}] {}", self.pc, disasm.unwrap_or("???".to_string()));
         }
 
-        let mut cycles : u8 = 0;
-
-        // TODO handle all halt cases, especially also exiting on reset.
-        // Extremely jank copy/pasting code right now, will clean up later.
-        if self.halt_flag {
-            let mut ie_reg = mmu_ref.get_ie();
-            let mut if_reg = mmu_ref.get_if();
-
-            // HALT BUG
-            //if (!self.ime) && ((ie_reg & if_reg) != 0) {
-            if false {
-                // fetch the next instruction, do not increment PC
-                self.halt_flag = false;
-                self.halt_bug_enabled = true;
-                //self.halt_bug_stuck_pc = self.pc;
-                println!("HALTED");
-                println!("IME: {}", self.ime);
-                println!("IE: {:08b}", mmu_ref.get_byte(0xFFFF as usize));
-                println!("IF: {:08b}", mmu_ref.get_byte(0xFF0F as usize));
-
-                // we need to keep going
-                //cycles = self.decode_execute(next_opcode, mmu_ref, cb_prefix);
-            }
-            else {
-                cycles = 4;
-                // we do not care about IME here
-                for i in 0..5 {
-                    let mask = 1 << i;
-                    if (ie_reg & mask) != 0 && (if_reg & mask) != 0 {
-                        self.halt_flag = false;
-                    }
-                }
-            }
-        }
-        else {
-            // returns the number of cycles for the current instruction
-            cycles = self.decode_execute(next_opcode, mmu_ref, cb_prefix);
-        }
+        // returns the number of cycles for the current instruction
+        let cycles = self.decode_execute(next_opcode, mmu_ref, cb_prefix);
 
         self.update_timers(cycles, mmu_ref);
 
@@ -788,59 +801,6 @@ impl CPU  {
             let mut cycles : u8 = ternary!(cb_prefix, cpu_tables::cb_prefixed_cycle_times[i1][i2], cpu_tables::cycle_times[i1][i2]);
             let	instruction_size : u8 = ternary!(cb_prefix, 2, cpu_tables::instruction_sizes[i1][i2]);
             let mut skip_increment = false;
-
-            // before anything else, check for interrupts
-            let mut ie_reg = mmu_ref.get_ie();
-            let mut if_reg = mmu_ref.get_if();
-
-            let interrupt_vectors = vec![0x40, 0x48, 0x50, 0x58, 0x60];
-
-            /*
-            println!("IME: {}", self.ime);
-            println!("IE: {:08b}", mmu_ref.get_byte(0xFFFF as usize));
-            println!("IF: {:08b}", mmu_ref.get_byte(0xFF0F as usize));
-            //println!("TIMA: {:08b}", mmu_ref.get_byte(0xFF05 as usize));
-            println!("TIMA: {}", mmu_ref.get_byte(0xFF05 as usize));
-            println!("TAC: {:08b}", mmu_ref.get_byte(0xFF07 as usize));
-            */
-
-            if self.ime && (ie_reg != 0) && (if_reg != 0) {
-                for i in 0..5 {
-                    let mask : u8 = 1u8 << i;
-
-                    if (ie_reg & mask) != 0 && (if_reg & mask) != 0 {
-                        //println!("IN HERE! {}", i);
-                        // Clear the IF bit (acknowledge the interrupt)
-                        if_reg &= !mask;
-                        mmu_ref.set_if(if_reg);
-
-                        // Simulate the cycles: 2 idle + 2 push + 1 jump = 5 cycles
-                        //self.tick(5); // or however you emulate instruction timing
-                        cycles = 5;
-
-                        // Push current PC
-                        self.set_sp(self.get_sp().wrapping_sub(1));
-                        mmu_ref.set_byte(self.get_sp() as usize, (self.pc >> 8) as u8);
-                        self.set_sp(self.get_sp().wrapping_sub(1));
-                        mmu_ref.set_byte(self.get_sp() as usize, (self.pc & 0xFF) as u8);
-
-                        // Jump to the interrupt vector
-                        self.pc = interrupt_vectors[i];
-                        skip_increment = true;
-
-                        self.ime = false;  
-
-                        if self.halt_bug_enabled {
-                            println!("INTERRUPT DURING HALT BUG!");
-                            self.halt_bug_enabled = false;
-                            self.halt_bug_stuck_pc = 0;
-                        }
-
-                        return cycles;
-                    }
-                }
-            }
-
 
             let nn = self.next_word(self.pc+1, mmu_ref);
             let n = self.fetch(self.pc+1, mmu_ref);

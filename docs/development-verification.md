@@ -56,6 +56,17 @@ Pokemon Red ROM currently reaches the New Game menu and proceeds through the
 intro into the player's bedroom with scripted input. Its cartridge uses the
 implemented MBC3 ROM/RAM banking subset; MBC3 RTC registers are not implemented.
 
+Kirby's Dream Land has a deterministic title-to-gameplay regression covering
+its HALT/VBlank-driven Stage 1 transition:
+
+```sh
+nix develop --command cargo test --release --test headless kirby_enters_green_greens_after_stage_intro -- --ignored --exact
+```
+
+The bundled Blargg `cpu_instrs` ROM passes all 11 groups. The cycle-exact
+`interrupt_time` ROM still reports failure and tracks remaining timer/bus
+interrupt precision work.
+
 ## ROM-Suite Regression Tests
 
 The heavier bundled ROM checks are available as ignored tests:

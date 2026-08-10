@@ -1,3 +1,4 @@
+use deitygb::cpu::CPU;
 use deitygb::headless::{default_boot_rom_path, load_file, GameBoy, TestOutcome, DMG_CPU_FREQUENCY};
 use deitygb::mmu::{JoypadButton, MMU};
 use deitygb::ppu::{PPU, Sprite};
@@ -81,6 +82,51 @@ fn joypad_selects_buttons_and_requests_interrupt() {
 }
 
 #[test]
+fn halted_cpu_does_not_fetch_cb_prefix_or_advance_pc() {
+    let mut mmu = MMU::new();
+    let mut cpu = CPU::new();
+    mmu.set_raw_byte(0xFF50, 1);
+    mmu.set_raw_byte(0x0000, 0x76); // HALT
+    mmu.set_raw_byte(0x0001, 0xCB); // Kirby waits with HALT; BIT 6,(HL).
+    mmu.set_raw_byte(0x0002, 0x76);
+
+    assert_eq!(cpu.cycle(&mut mmu), 4);
+    assert!(cpu.is_halted());
+    assert_eq!(cpu.program_counter(), 0x0001);
+
+    for _ in 0..8 {
+        assert_eq!(cpu.cycle(&mut mmu), 4);
+        assert!(cpu.is_halted());
+        assert_eq!(cpu.program_counter(), 0x0001);
+    }
+}
+
+#[test]
+fn interrupt_after_halt_is_serviced_before_cb_prefix_fetch() {
+    let mut mmu = MMU::new();
+    let mut cpu = CPU::new();
+    mmu.set_raw_byte(0xFF50, 1);
+    mmu.set_raw_byte(0x0000, 0xFB); // EI
+    mmu.set_raw_byte(0x0001, 0x00); // NOP; IME becomes active afterward.
+    mmu.set_raw_byte(0x0002, 0x76); // HALT
+    mmu.set_raw_byte(0x0003, 0xCB); // Kirby's next instruction begins with CB.
+    mmu.set_raw_byte(0x0004, 0x76);
+
+    cpu.cycle(&mut mmu);
+    cpu.cycle(&mut mmu);
+    cpu.cycle(&mut mmu);
+    assert!(cpu.is_halted());
+    assert_eq!(cpu.program_counter(), 0x0003);
+
+    mmu.set_raw_byte(0xFFFF, 0x01);
+    mmu.set_if(0x01);
+    assert_eq!(cpu.cycle(&mut mmu), 20);
+    assert_eq!(cpu.program_counter(), 0x0040);
+    assert_eq!(mmu.get_raw_byte(0xFFFE), 0x03);
+    assert_eq!(mmu.get_raw_byte(0xFFFF), 0x00);
+}
+
+#[test]
 fn mbc1_mode_one_keeps_switchable_rom_bank_in_lower_region() {
     let mut rom = vec![0; 64 * 0x4000];
     for bank in 0..64 {
@@ -145,6 +191,25 @@ fn pokemon_red_reaches_new_game_menu() {
     gb.run_for_cycles(DMG_CPU_FREQUENCY * 6);
 
     assert_eq!(fnv1a(&gb.framebuffer_rgba()), 0xd70b_a3bc_7247_de85);
+}
+
+#[test]
+#[ignore = "runs the local Kirby ROM for a deterministic title-to-gameplay smoke test"]
+fn kirby_enters_green_greens_after_stage_intro() {
+    let rom = load_file(&repo_path("src/roms/kirby.gb")).unwrap();
+    let boot = load_file(&default_boot_rom_path()).unwrap();
+    let mut gb = GameBoy::new();
+    gb.set_apu_enabled(false);
+    gb.load_boot_rom(&boot);
+    gb.load_rom(&rom);
+
+    gb.run_for_cycles(DMG_CPU_FREQUENCY * 10);
+    gb.set_button(JoypadButton::Start, true);
+    gb.run_for_cycles(DMG_CPU_FREQUENCY);
+    gb.set_button(JoypadButton::Start, false);
+    gb.run_for_cycles(DMG_CPU_FREQUENCY * 7);
+
+    assert_eq!(fnv1a(&gb.framebuffer_rgba()), 0xe214_9d85_9336_6ec9);
 }
 
 #[test]

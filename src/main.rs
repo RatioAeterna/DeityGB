@@ -1,60 +1,131 @@
 use std::env;
 
-
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use std::time::{Duration, Instant};
-use std::sync::mpsc;
-use macroquad::prelude::*;
-use deitygb::{apu, cpu, mmu, ppu};
 use deitygb::headless::{default_boot_rom_path, load_file};
 use deitygb::mmu::JoypadButton;
-
+use deitygb::{apu, cpu, mmu, ppu};
+use macroquad::prelude::*;
+use std::convert::TryInto;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 const CYCLES_PER_FRAME: u32 = 70_224;
+const STARTUP_SPLASH_SECONDS: f64 = 1.8;
+const FIERCE_DEITY_PNG: &[u8] = include_bytes!("../assets/fierce_deity.png");
 
-const GB_SCREEN_DIM : u32 = 23040; // 160x144
-const SCREEN_UPSCALE_FACTOR : f32 = 5.0; // gameboy screen is super tiny, so we upscale it
+const GB_SCREEN_DIM: u32 = 23040; // 160x144
+const SCREEN_UPSCALE_FACTOR: f32 = 5.0; // gameboy screen is super tiny, so we upscale it
+
+fn icon_pixels<const N: usize>(size: u32) -> [u8; N] {
+    use image::imageops::FilterType;
+
+    image::load_from_memory(FIERCE_DEITY_PNG)
+        .expect("fierce_deity.png should be a valid image")
+        .resize_exact(size, size, FilterType::Lanczos3)
+        .to_rgba8()
+        .into_raw()
+        .try_into()
+        .unwrap_or_else(|pixels: Vec<u8>| panic!("expected {N} icon bytes, got {}", pixels.len()))
+}
+
+fn window_conf() -> Conf {
+    Conf {
+        window_title: "Fierce Deity's GB".to_owned(),
+        window_width: 160 * 5,
+        window_height: 144 * 5,
+        icon: Some(macroquad::miniquad::conf::Icon {
+            small: icon_pixels::<{ 16 * 16 * 4 }>(16),
+            medium: icon_pixels::<{ 32 * 32 * 4 }>(32),
+            big: icon_pixels::<{ 64 * 64 * 4 }>(64),
+        }),
+        ..Default::default()
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn set_macos_application_icon() {
+    use objc::runtime::Object;
+    use objc::{class, msg_send, sel, sel_impl};
+
+    unsafe {
+        let application: *mut Object = msg_send![class!(NSApplication), sharedApplication];
+        let data: *mut Object = msg_send![class!(NSData),
+            dataWithBytes: FIERCE_DEITY_PNG.as_ptr()
+            length: FIERCE_DEITY_PNG.len()
+        ];
+        let image: *mut Object = msg_send![class!(NSImage), alloc];
+        let image: *mut Object = msg_send![image, initWithData: data];
+        let _: () = msg_send![application, setApplicationIconImage: image];
+        let _: () = msg_send![image, release];
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_macos_application_icon() {}
+
+async fn show_startup_splash() {
+    let splash = Texture2D::from_file_with_format(FIERCE_DEITY_PNG, Some(ImageFormat::Png));
+    splash.set_filter(FilterMode::Nearest);
+
+    let started_at = get_time();
+    while get_time() - started_at < STARTUP_SPLASH_SECONDS {
+        clear_background(BLACK);
+
+        let scale = (screen_width() / splash.width()).min(screen_height() / splash.height());
+        let size = vec2(splash.width() * scale, splash.height() * scale);
+        draw_texture_ex(
+            &splash,
+            (screen_width() - size.x) / 2.0,
+            (screen_height() - size.y) / 2.0,
+            WHITE,
+            DrawTextureParams {
+                dest_size: Some(size),
+                ..Default::default()
+            },
+        );
+        next_frame().await;
+    }
+}
 
 fn host_frame_due(vblank_frame_ready: bool, accumulated_cycles: u32) -> bool {
     vblank_frame_ready || accumulated_cycles >= CYCLES_PER_FRAME
 }
 
-
 pub struct SimpleAudio {
     _stream: cpal::Stream,
 }
-
 
 impl SimpleAudio {
     pub fn new() -> (Self, mpsc::Sender<f32>) {
         let host = cpal::default_host();
         let device = host.default_output_device().unwrap();
         let config = device.default_output_config().unwrap();
-        
+
         // Create a channel for sending samples from APU to audio thread
         let (sample_sender, sample_receiver) = mpsc::channel::<f32>();
-        
-        let stream = device.build_output_stream(
-            &config.into(),
-            move |data: &mut [f32], _| {
-                for sample in data.iter_mut() {
-                    // Try to get a sample from the APU
-                    match sample_receiver.try_recv() {
-                        Ok(apu_sample) => *sample = apu_sample,
-                        Err(_) => *sample = 0.0,  // No sample available = silence
+
+        let stream = device
+            .build_output_stream(
+                &config.into(),
+                move |data: &mut [f32], _| {
+                    for sample in data.iter_mut() {
+                        // Try to get a sample from the APU
+                        match sample_receiver.try_recv() {
+                            Ok(apu_sample) => *sample = apu_sample,
+                            Err(_) => *sample = 0.0, // No sample available = silence
+                        }
                     }
-                }
-            },
-            |_| {},
-            None,
-        ).unwrap();
-        
+                },
+                |_| {},
+                None,
+            )
+            .unwrap();
+
         stream.play().unwrap();
-        
+
         (Self { _stream: stream }, sample_sender)
     }
 }
-
 
 fn handle_input(mmu: &mut mmu::MMU) {
     mmu.set_joypad_button(JoypadButton::Up, is_key_down(KeyCode::W));
@@ -67,7 +138,7 @@ fn handle_input(mmu: &mut mmu::MMU) {
     mmu.set_joypad_button(JoypadButton::Start, is_key_down(KeyCode::Enter));
 }
 
-#[macroquad::main("Fierce Deity's GB")]
+#[macroquad::main(window_conf)]
 async fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
@@ -76,6 +147,9 @@ async fn main() {
     }
     let apu_enabled = args.iter().any(|arg| arg == "--apu");
     let capture_lcd = args.iter().any(|arg| arg == "--capture-lcd");
+
+    set_macos_application_icon();
+    show_startup_splash().await;
 
     let (_audio, sender, _silent_receiver) = if apu_enabled {
         let (audio, sender) = SimpleAudio::new();
@@ -89,7 +163,7 @@ async fn main() {
     let mut cpu = cpu::CPU::new();
     let mut ppu = ppu::PPU::new();
     let mut apu = apu::APU::new(sender);
-    
+
     /*
     let path = Path::new(&args[1]);
     let display = path.display();
@@ -104,7 +178,6 @@ async fn main() {
     mmu.load_boot_rom(&boot_byte_buffer);
     mmu.map_cartridge_nintendo_logo();
 
-
     /*
     let hex_values: Vec<String> = byte_buffer.iter()
                                     .map(|byte| format!("{:02x}", byte))
@@ -116,20 +189,12 @@ async fn main() {
     let cartridge_byte_buffer = load_file(args[1].as_ref()).expect("Couldn't read cartridge ROM");
     mmu.load_rom(&cartridge_byte_buffer);
 
-    let fd_title : String = "Fierce Deity's GB".to_string();
-    let conf = Conf {
-        window_title: fd_title,
-        window_width: 160*5,
-        window_height: 144*5,
-        ..Default::default()
-    };
-
-    let mut accumulated_cycles : u32 = 0;
-    let mut gb_screen : [u8; 5760] = [0; 5760];
+    let mut accumulated_cycles: u32 = 0;
+    let mut gb_screen: [u8; 5760] = [0; 5760];
 
     // NOTE: We have four pixels per bit, so we multiply by 4 once, and then there are four
     // CHANNELS per pixel (rgba) so we multiply by 4 again.
-    let screen_dimension : usize = gb_screen.len() * 4 * 4;
+    let screen_dimension: usize = gb_screen.len() * 4 * 4;
     let mut screen_image = Image {
         bytes: vec![0; screen_dimension],
         width: 160,
@@ -137,7 +202,6 @@ async fn main() {
     };
     let screen_texture = Texture2D::from_rgba8(160, 144, &screen_image.bytes);
     screen_texture.set_filter(FilterMode::Nearest);
-
 
     let mut last_fps_check = get_time();
     let mut frames = 0;
@@ -147,8 +211,7 @@ async fn main() {
     let frame_duration = Duration::from_secs_f64(1.0 / target_fps);
     let mut last_frame_time = Instant::now();
 
-
-    let mut rendered_yet : bool = false;
+    let mut rendered_yet: bool = false;
     let mut last_lcd_enabled = mmu.get_byte(0xFF40) & 0x80 != 0;
     let mut lcd_transition = 0u32;
     let mut frames_since_lcd_transition = None;
@@ -203,43 +266,46 @@ async fn main() {
             accumulated_cycles = 0;
 
             for i in 0..(gb_screen.len()) {
-
                 let four_pixels = gb_screen[i];
 
                 for j in (0..4).rev() {
-                    let pixel = (four_pixels & (0b11 << (j*2))) >> (j*2);
+                    let pixel = (four_pixels & (0b11 << (j * 2))) >> (j * 2);
                     // multiply by 16, because each group of four pixels,
                     // "each byte of gb_screen", takes up 16 bytes in our final
                     // render array.
-                    let pixel_idx = 16*i+4*(3-j);
+                    let pixel_idx = 16 * i + 4 * (3 - j);
 
                     match pixel {
                         // the alleged color scheme
-                        0b00 => { // white
-                                  screen_image.bytes[pixel_idx+0] = 0xC4;
-                                  screen_image.bytes[pixel_idx+1] = 0xCF;
-                                  screen_image.bytes[pixel_idx+2] = 0xA1;
-                                },
-                        0b01 => { // light gray
-                                  screen_image.bytes[pixel_idx+0] = 0x8B;
-                                  screen_image.bytes[pixel_idx+1] = 0xAC;
-                                  screen_image.bytes[pixel_idx+2] = 0x0F;
-                                },
-                        0b10 => { // dark gray
-                                  screen_image.bytes[pixel_idx+0] = 0x30;
-                                  screen_image.bytes[pixel_idx+1] = 0x62;
-                                  screen_image.bytes[pixel_idx+2] = 0x30;
-                                },
-                        0b11 => { // black
-                                  screen_image.bytes[pixel_idx+0] = 0x0F;
-                                  screen_image.bytes[pixel_idx+1] = 0x38;
-                                  screen_image.bytes[pixel_idx+2] = 0x0F;
-                                },
+                        0b00 => {
+                            // white
+                            screen_image.bytes[pixel_idx + 0] = 0xC4;
+                            screen_image.bytes[pixel_idx + 1] = 0xCF;
+                            screen_image.bytes[pixel_idx + 2] = 0xA1;
+                        }
+                        0b01 => {
+                            // light gray
+                            screen_image.bytes[pixel_idx + 0] = 0x8B;
+                            screen_image.bytes[pixel_idx + 1] = 0xAC;
+                            screen_image.bytes[pixel_idx + 2] = 0x0F;
+                        }
+                        0b10 => {
+                            // dark gray
+                            screen_image.bytes[pixel_idx + 0] = 0x30;
+                            screen_image.bytes[pixel_idx + 1] = 0x62;
+                            screen_image.bytes[pixel_idx + 2] = 0x30;
+                        }
+                        0b11 => {
+                            // black
+                            screen_image.bytes[pixel_idx + 0] = 0x0F;
+                            screen_image.bytes[pixel_idx + 1] = 0x38;
+                            screen_image.bytes[pixel_idx + 2] = 0x0F;
+                        }
 
                         _ => panic!("Invalid pixel value"),
                     }
                     // alpha channel
-                    screen_image.bytes[pixel_idx+3] = 255;
+                    screen_image.bytes[pixel_idx + 3] = 255;
                 }
             }
             screen_texture.update(&screen_image);
@@ -278,10 +344,7 @@ async fn main() {
             if capture_lcd {
                 if let Some(frame) = frames_since_lcd_transition {
                     if matches!(frame, 0 | 1 | 2 | 5 | 10 | 30 | 60 | 120) {
-                        let prefix = format!(
-                            "/tmp/deitygb-lcd-{:02}-{:03}",
-                            lcd_transition, frame
-                        );
+                        let prefix = format!("/tmp/deitygb-lcd-{:02}-{:03}", lcd_transition, frame);
                         screen_image.export_png(&format!("{}-framebuffer.png", prefix));
                         get_screen_data().export_png(&format!("{}-window.png", prefix));
                         eprintln!(
@@ -301,8 +364,6 @@ async fn main() {
             next_frame().await;
         }
     }
-
-
 }
 
 #[cfg(test)]

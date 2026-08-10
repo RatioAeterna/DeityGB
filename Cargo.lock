@@ -8,7 +8,9 @@ version = "0.1.0"
 dependencies = [
  "cpal",
  "csv",
+ "image",
  "macroquad",
+ "objc",
 ]
 
 [[package]]

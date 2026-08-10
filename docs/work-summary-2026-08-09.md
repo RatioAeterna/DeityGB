@@ -101,3 +101,90 @@ of several known accuracy gaps at different scene boundaries.
    against Mooneye tests.
 5. Turn the manual Pokemon route and first battle into deterministic input/state
    regressions before making further persistence changes.
+
+## Later Session: Kirby Stage-Intro Fix
+
+Kirby's Dream Land previously reached the Stage 1 / Green Greens card but
+never entered gameplay. The frontend remained responsive at roughly 57 FPS,
+which established that this was an emulated CPU control-flow problem rather
+than a host-window hang.
+
+### Reproduction and Diagnosis
+
+- Reproduced the failure deterministically with `gb-headless`, a Start pulse at
+  emulated second 10, APU disabled, and framebuffer captures between seconds
+  13 and 40.
+- Identified the wait loop in Kirby ROM bank 6:
+  - `0x4399`: `CB F6` / `SET 6,(HL)`, setting bit 6 at HRAM `FF8C`.
+  - `0x439B`: `HALT`, waiting for VBlank.
+  - `0x439C`: `CB 76` / `BIT 6,(HL)`.
+  - `0x439E`: `JR NZ`, repeating until the VBlank handler clears the bit.
+- Confirmed that Kirby's VBlank handler clears the `FF8C` wait flag, but the
+  stage countdown in `DE` remained fixed at `0x013F` and execution repeatedly
+  appeared halted at `0x439C` or `0x439E`.
+- Added headless reporting for `DE`, HALT/IME state, LYC, DIV/TIMA/TMA/TAC,
+  JOYP, and the transition-related `FF8B`, `FF8C`, `FF8E`, `FF94`, and `D03B`
+  values. These diagnostics made the bad interrupt return address visible.
+
+### CPU Bugs Found
+
+Two ordering bugs combined specifically when `HALT` was followed by a
+CB-prefixed instruction:
+
+1. `CPU::cycle` fetched and processed the CB prefix before checking whether the
+   CPU was halted. Every idle HALT tick could therefore mutate PC even though a
+   halted CPU must not fetch an opcode.
+2. After an interrupt woke HALT, interrupt arbitration still occurred inside
+   `decode_execute`, after the CB-prefix fetch had advanced PC. VBlank pushed
+   `0x439D` instead of `0x439C` as its return address. `RETI` then returned into
+   the `0x76` operand of `CB 76`, interpreting that operand as a standalone
+   `HALT` and trapping the transition.
+
+An intermediate hypothesis blamed the general CB instruction length. A focused
+test disproved it: the decoder intentionally backs PC up after reading the
+prefix, so its existing two-byte final increment was correct. That provisional
+change was reverted before the final fix.
+
+### Implementation
+
+- HALT is now resolved before any opcode or prefix fetch. With no enabled
+  pending interrupt it consumes 4 T-cycles, updates DIV/TIMA, and leaves PC
+  untouched.
+- Interrupt priority and entry now occur before opcode fetch for both running
+  and newly awakened CPUs.
+- Interrupt entry clears the selected IF bit, disables IME, pushes the exact
+  current PC, jumps to the corresponding vector, and consumes the hardware's
+  20 T-cycles instead of the previous incorrect 5.
+- Added CPU state getters used by the headless diagnostics.
+
+### Regression Coverage and Results
+
+- Added a focused regression proving an idle halted CPU cannot consume a
+  following `0xCB` byte or advance PC.
+- Added a regression proving VBlank after `HALT` is serviced before a following
+  CB-prefix fetch and pushes the correct return address.
+- Added an ignored deterministic Kirby ROM smoke test. It presses Start at
+  second 10 and verifies a Green Greens gameplay framebuffer at second 18 with
+  FNV-1a hash `e2149d8593366ec9`.
+- Default headless integration suite: 10 passed, 4 ignored.
+- Kirby title-to-gameplay smoke test: passed.
+- Pokemon Red title-to-New Game framebuffer regression: still passed with its
+  existing hash.
+- Blargg `cpu_instrs`: all 11 groups reported `ok`; overall result `Passed`.
+- Blargg `interrupt_time` still displays `Failed`. Interrupt ordering and entry
+  duration are now corrected, but cycle-exact timer/bus interrupt behavior is
+  still incomplete and remains a separate accuracy project.
+
+## Fierce Deity Frontend Branding
+
+- Embedded `assets/fierce_deity.png` in the executable and display it for 1.8
+  seconds before CPU/MMU construction and boot-ROM execution.
+- Replaced the previously unused local Macroquad `Conf` value with the actual
+  `window_conf` callback, preserving the intended 800x720 window title/size.
+- Generate 16x16, 32x32, and 64x64 RGBA icon variants for Miniquad-supported
+  platforms.
+- Added a macOS Cocoa application-icon hook because the pinned Miniquad release
+  does not implement macOS Dock icons. The Fierce Deity art now appears in the
+  Dock while DeityGB runs.
+- Kept all branding work isolated from emulation state and timing. The splash
+  completes before the Game Boy core is constructed.
