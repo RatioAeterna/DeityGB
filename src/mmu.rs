@@ -1484,6 +1484,10 @@ impl MMU {
             return self.memory[addr];
         }
 
+        if addr == 0xFF0F {
+            return self.memory[addr] | 0xE0;
+        }
+
         if (0x8000..=0x9FFF).contains(&addr) {
             if self.vram_banned {
                 return 0xFF;

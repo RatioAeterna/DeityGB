@@ -288,6 +288,23 @@ fn joypad_selects_buttons_and_requests_interrupt() {
 }
 
 #[test]
+fn interrupt_flag_bus_reads_force_unused_bits_high() {
+    let mut mmu = MMU::new();
+
+    mmu.set_byte(0xFF0F, 0xFF);
+    assert_eq!(mmu.get_if(), 0xFF);
+    assert_eq!(mmu.get_byte(0xFF0F), 0xFF);
+
+    mmu.set_byte(0xFF0F, 0x10);
+    assert_eq!(mmu.get_if(), 0x10);
+    assert_eq!(mmu.get_byte(0xFF0F), 0xF0);
+
+    mmu.set_if(0xE1);
+    assert_eq!(mmu.get_if(), 0xE1);
+    assert_eq!(mmu.get_byte(0xFF0F), 0xE1);
+}
+
+#[test]
 fn halted_cpu_does_not_fetch_cb_prefix_or_advance_pc() {
     let mut mmu = MMU::new();
     let mut cpu = CPU::new();

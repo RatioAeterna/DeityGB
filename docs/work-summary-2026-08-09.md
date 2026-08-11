@@ -755,7 +755,7 @@ LY advances at dot 452 of the startup line while the transition remains at dot
 456. HBlank then avoids incrementing LY twice. LCD synchronization and
 steady-state OAM timing therefore pass together without shifting CGB behavior.
 
-### HALT Bug: Improved but Explicitly Open
+### HALT Bug: Closed by Hardware-Visible IF Semantics
 
 HALT with IME clear and an already-pending enabled interrupt suppresses the next
 opcode-fetch PC increment. DeityGB now carries that condition beyond HALT and
@@ -764,11 +764,30 @@ reuses the following opcode byte as the instruction's first operand. A focused
 CPU with IME enabled is still serviced before the next opcode, preserving the
 Kirby startup fix.
 
-The complete `halt_bug.gb` matrix still fails its checksum. All nine cases run
-and print coherent IE/IF/DE observations, but some pending-interrupt combinations
-still disagree with the expected fetch sequence. This is the sole known Blargg
-holdout and should resume from the captured C074-C08E routine; it is not being
-misrepresented as completed in this checkpoint.
+The remaining Blargg failure was not the opcode-reuse path itself. The IF
+register at `FF0F` has five real interrupt-request bits; the upper three bits
+are unused and read back as one on the bus. DeityGB had been exposing the stored
+byte verbatim, so `halt_bug.gb` saw stale high-bit behavior in its printed
+matrix and checksum even though CPU interrupt arbitration masked to the real
+low-five bits.
+
+The boundary is now explicit. `MMU::get_byte(0xFF0F)` returns `stored | 0xE0`,
+matching what emulated software reads. CPU interrupt arbitration already masks
+to the real low-five interrupt-request bits, so the raw `get_if`/`set_if`
+helpers keep their existing stored-byte behavior for interrupt timing and PPU
+call sites. A focused unit test covers normal bus reads, raw `get_if`, and
+direct `set_if`.
+
+With that fix, the full `halt_bug.gb` matrix passes. The visible rows now show
+the expected hardware-facing IF values such as `E1` and `F1`, while the CPU
+still services only enabled low-five interrupt requests. This closes the last
+known bundled Blargg CPU/timing holdout.
+
+While rechecking the neighboring suites, `interrupt_time` initially appeared to
+fail only because it had been launched with `--no-apu`. Its `get_cpu_speed`
+helper intentionally measures CPU speed through APU behavior rather than KEY1,
+so the ROM must run with APU enabled to validate both normal and double-speed
+rows. With APU enabled it reports `00 08 0D` and `01 08 0D` and passes.
 
 ### Verification Matrix
 
@@ -776,11 +795,11 @@ misrepresented as completed in this checkpoint.
 - `instr_timing`: passed.
 - `mem_timing`: 3/3 passed.
 - `mem_timing-2`: 3/3 passed.
-- `interrupt_time`: passed in normal and CGB double speed.
-- `oam_bug`: 8/8 passed with `--dmg`.
+- `interrupt_time`: passed in normal and CGB double speed with APU enabled.
+- `oam_bug`: 8/8 passed with `--dmg --no-boot`.
 - `dmg_sound`: 12/12 passed.
 - `cgb_sound`: 12/12 passed.
-- `halt_bug`: still failing and retained as follow-up work.
+- `halt_bug`: passed.
 
 The headless runner now reports CGB mode, KEY1, and double-speed state, accepts
 `--dmg` for hardware-specific ROMs, and accepts `--trace` for targeted CPU
@@ -1077,3 +1096,26 @@ path or `--no-boot` disables boot ROM loading for tests. Coverage includes
 `cgb_boot_rom_maps_extended_boot_window`, which verifies that CGB boot bytes are
 visible at `0000`, `0200`, and `08FF` before `FF50`, and that cartridge ROM
 bytes are visible again after unmapping.
+
+## Macroquad Frame Pacing Cleanup
+
+The frontend was manually sleeping for roughly one Game Boy frame and then
+calling `next_frame().await`. Macroquad already yields to the windowing backend
+and presentation pacing there, so the extra `std::thread::sleep` could push
+each frame a little late. On a 60 Hz host display that showed up as an observed
+56-57 FPS in the overlay and, because APU samples are produced as emulated
+cycles advance, slightly under-produced audio that sounded slow.
+
+The manual host sleep has been removed. Emulation still advances according to
+Game Boy CPU/peripheral cycles and still presents only when a VBlank frame is
+ready or the fallback `CYCLES_PER_FRAME` budget has elapsed. The host-facing
+pace is now owned by macroquad's frame boundary instead of a second coarse
+sleep layered inside the render path. This is intentionally conservative: it
+does not change PPU timing, APU timing, cartridge persistence, or the headless
+runner.
+
+The remaining timing follow-up, if frontend audio/video drift persists on some
+machines, is a proper wall-clock cycle accumulator with audio-buffer feedback.
+That would be a larger synchronization change. This checkpoint fixes the
+obvious double-throttle first so Pokemon Crystal/Silver should run much closer
+to the host's 60 Hz presentation rate.

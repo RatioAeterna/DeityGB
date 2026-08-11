@@ -231,10 +231,6 @@ async fn main() {
     let mut frames = 0;
     let mut fps_display = String::new();
 
-    let target_fps = 59.7275;
-    let frame_duration = Duration::from_secs_f64(1.0 / target_fps);
-    let mut last_frame_time = Instant::now();
-
     let mut rendered_yet: bool = false;
     let mut last_lcd_enabled = mmu.get_byte(0xFF40) & 0x80 != 0;
     let mut lcd_transition = 0u32;
@@ -325,12 +321,6 @@ async fn main() {
                 frames = 0;
                 last_fps_check = now;
             }
-
-            let current_frame_elapsed = last_frame_time.elapsed();
-            if current_frame_elapsed < frame_duration {
-                std::thread::sleep(frame_duration - current_frame_elapsed);
-            }
-            last_frame_time = Instant::now();
 
             draw_text(&fps_display, 10.0, 20.0, 30.0, BLACK);
 

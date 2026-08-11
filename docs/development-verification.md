@@ -129,19 +129,22 @@ nix develop --command cargo test --release --test headless links_awakening_dx_re
 The bundled Blargg `cpu_instrs` ROM passes all 11 groups. The `instr_timing`,
 both `mem_timing` generations, and cycle-exact `interrupt_time` ROMs also pass.
 `interrupt_time` validates the documented interrupt entry in both normal and
-CGB double-speed operation.
+CGB double-speed operation. Run `interrupt_time` with APU enabled; its bundled
+CPU-speed probe observes APU timing, so `--no-apu` produces a false speed-column
+failure even when interrupt latency is correct.
 
 The DMG-only OAM corruption suite must be run with `--dmg`, because its ROM
 header also permits CGB hardware and CGB hardware does not exhibit the bug:
 
 ```sh
 nix develop --command cargo run --release --bin gb-headless -- \
-  src/roms/gb-test-roms/oam_bug/oam_bug.gb --seconds 120 --no-apu --dmg
+  src/roms/gb-test-roms/oam_bug/oam_bug.gb --seconds 120 --no-apu --dmg --no-boot
 ```
 
-All eight OAM groups pass. The standalone `halt_bug.gb` remains the only known
-failing bundled Blargg ROM. Basic opcode-byte reuse after HALT is covered by a
-unit test, but the complete pending-interrupt matrix remains follow-up work.
+All eight OAM groups pass. The standalone `halt_bug.gb` now passes as well. Its
+final fix was the `FF0F` bus contract: CPU interrupt arbitration masks to the
+five real request bits, while normal software reads force the unused upper three
+bits high.
 
 ## ROM-Suite Regression Tests
 
