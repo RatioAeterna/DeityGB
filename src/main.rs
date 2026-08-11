@@ -1,6 +1,7 @@
 use std::env;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use deitygb::cartridge_save::CartridgeSave;
 use deitygb::headless::{default_boot_rom_path, load_file};
 use deitygb::mmu::JoypadButton;
 use deitygb::{apu, cpu, mmu, ppu};
@@ -12,6 +13,7 @@ use std::time::{Duration, Instant};
 const CYCLES_PER_FRAME: u32 = 70_224;
 const STARTUP_SPLASH_SECONDS: f64 = 1.8;
 const FIERCE_DEITY_PNG: &[u8] = include_bytes!("../assets/fierce_deity.png");
+const SAVE_FLUSH_DEBOUNCE: Duration = Duration::from_secs(1);
 
 const GB_SCREEN_DIM: u32 = 23040; // 160x144
 const SCREEN_UPSCALE_FACTOR: f32 = 5.0; // gameboy screen is super tiny, so we upscale it
@@ -193,8 +195,22 @@ async fn main() {
     println!("{}", hex_str);
     */
 
-    let cartridge_byte_buffer = load_file(args[1].as_ref()).expect("Couldn't read cartridge ROM");
+    let rom_path = std::path::Path::new(&args[1]);
+    let cartridge_byte_buffer = load_file(rom_path).expect("Couldn't read cartridge ROM");
     mmu.load_rom(&cartridge_byte_buffer);
+    let mut cartridge_save = CartridgeSave::for_rom_path(rom_path);
+    let save_report = cartridge_save.load_after_rom(&mut mmu);
+    if save_report.enabled {
+        if let Some(path) = &save_report.save_path {
+            eprintln!("save-path: {}", path.display());
+        }
+        if let Some(path) = &save_report.rtc_path {
+            eprintln!("rtc-path: {}", path.display());
+        }
+    }
+    for message in &save_report.messages {
+        eprintln!("save: {}", message);
+    }
 
     let mut accumulated_cycles: u32 = 0;
     let mut screen_image = Image {
@@ -217,9 +233,20 @@ async fn main() {
     let mut last_lcd_enabled = mmu.get_byte(0xFF40) & 0x80 != 0;
     let mut lcd_transition = 0u32;
     let mut frames_since_lcd_transition = None;
+    let mut last_save_flush = Instant::now();
     // Used to keep track of whether we have completed our *one* (1) per-frame render during
     // the vblank period of this frame, yet.
     loop {
+        if is_quit_requested() {
+            if let Err(error) = cartridge_save.flush_if_dirty(&mut mmu) {
+                eprintln!(
+                    "save: failed to flush cartridge persistence on shutdown: {}",
+                    error
+                );
+            }
+            break;
+        }
+
         if ppu.reached_oam() && rendered_yet {
             // the beginning of a new 'cycle' for the PPU (tho that is a super overloaded term in
             // this project)
@@ -322,6 +349,27 @@ async fn main() {
             }
 
             next_frame().await;
+        }
+
+        if last_save_flush.elapsed() >= SAVE_FLUSH_DEBOUNCE {
+            match cartridge_save.flush_report_if_dirty(&mut mmu) {
+                Ok(report) => {
+                    if report.cartridge_ram_written {
+                        eprintln!(
+                            "save: flushed cartridge RAM to {}",
+                            cartridge_save.save_path().display()
+                        );
+                    }
+                    if report.rtc_written {
+                        eprintln!(
+                            "save: flushed MBC3 RTC sidecar to {}",
+                            cartridge_save.rtc_path().display()
+                        );
+                    }
+                }
+                Err(error) => eprintln!("save: failed to flush cartridge persistence: {}", error),
+            }
+            last_save_flush = Instant::now();
         }
     }
 }

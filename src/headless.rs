@@ -1,4 +1,5 @@
 use crate::apu::APU;
+use crate::cartridge_save::{CartridgeSave, SaveLoadReport};
 use crate::cpu::CPU;
 use crate::mmu::{JoypadButton, MMU};
 use crate::ppu::PPU;
@@ -40,6 +41,7 @@ pub struct GameBoy {
     frames: u64,
     cycles: u64,
     rendered_this_frame: bool,
+    save: Option<CartridgeSave>,
 }
 
 impl GameBoy {
@@ -55,6 +57,7 @@ impl GameBoy {
             frames: 0,
             cycles: 0,
             rendered_this_frame: false,
+            save: None,
         }
     }
 
@@ -64,6 +67,23 @@ impl GameBoy {
 
     pub fn load_rom(&mut self, rom: &[u8]) {
         self.mmu.load_rom(&rom.to_vec());
+        self.save = None;
+    }
+
+    pub fn load_rom_from_path(&mut self, path: &Path) -> io::Result<SaveLoadReport> {
+        let rom = load_file(path)?;
+        self.mmu.load_rom(&rom);
+        let mut save = CartridgeSave::for_rom_path(path);
+        let report = save.load_after_rom(&mut self.mmu);
+        self.save = Some(save);
+        Ok(report)
+    }
+
+    pub fn flush_save_if_dirty(&mut self) -> io::Result<bool> {
+        match &self.save {
+            Some(save) => save.flush_if_dirty(&mut self.mmu),
+            None => Ok(false),
+        }
     }
 
     pub fn set_force_dmg(&mut self, force_dmg: bool) {
@@ -78,7 +98,12 @@ impl GameBoy {
         let pc = self.cpu.program_counter();
         let bank = self.mmu.mapped_rom_bank(pc);
         let cycles = self.cpu.cycle(&mut self.mmu);
-        assert!(cycles > 0, "CPU returned zero cycles at bank {:#04x}, PC {:#06x}", bank, pc);
+        assert!(
+            cycles > 0,
+            "CPU returned zero cycles at bank {:#04x}, PC {:#06x}",
+            bank,
+            pc
+        );
         let peripheral_cycles = self.mmu.peripheral_cycles(cycles);
         self.mmu.tick_rtc(u64::from(peripheral_cycles));
         self.ppu.cycle(peripheral_cycles, &mut self.mmu);
@@ -149,8 +174,11 @@ impl GameBoy {
     }
 
     pub fn blargg_memory_text(&self) -> Option<String> {
-        if [self.mmu.get_byte(0xA001), self.mmu.get_byte(0xA002), self.mmu.get_byte(0xA003)]
-            != [0xDE, 0xB0, 0x61]
+        if [
+            self.mmu.get_byte(0xA001),
+            self.mmu.get_byte(0xA002),
+            self.mmu.get_byte(0xA003),
+        ] != [0xDE, 0xB0, 0x61]
         {
             return None;
         }
@@ -192,7 +220,6 @@ pub fn load_file(path: &Path) -> io::Result<Vec<u8>> {
 pub fn default_boot_rom_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/dmg_boot.bin")
 }
-
 
 pub fn packed_framebuffer_to_rgba(screen: &[u8; 5760]) -> Vec<u8> {
     let mut rgba = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT * 4];

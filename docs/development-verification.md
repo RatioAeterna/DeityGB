@@ -26,6 +26,27 @@ nix develop --command cargo run --release --bin DeityGB -- src/roms/pokemon_silv
 Controls are WASD for the D-pad, J/K for A/B, Enter for Start, and Left Shift
 for Select.
 
+Battery-backed cartridge saves are loaded once after the selected ROM has been
+initialized. The save path is deterministic and adjacent to the ROM, with the
+same stem and a `.sav` extension; for example `src/roms/pokemon_silver.sav`.
+MBC3 cartridges with an RTC also use an adjacent `.rtc` sidecar so the raw
+`.sav` remains ordinary cartridge RAM. The frontend and headless runner print
+the selected paths at startup when the header declares a battery.
+
+The `.sav` file is exactly the cartridge RAM size declared by header byte
+`0149`. Missing files mean a clean first boot and are not created until the game
+writes cartridge RAM or RTC state. Truncated saves are loaded into the beginning
+of RAM with the rest left empty; oversized saves load only the declared RAM
+range and are rewritten to the declared size after the next dirty flush.
+Non-battery cartridges never write `.sav` files.
+
+Flushes are deliberate and atomic: DeityGB writes a temporary file beside the
+target and renames it into place. The macroquad frontend flushes dirty cartridge
+persistence on shutdown and at a one-second debounce while playing; the
+headless runner flushes once before exit. Dirty tracking lives in the MMU at
+the cartridge RAM and RTC write boundary, so ordinary frames do not cause disk
+writes merely because a game is running.
+
 The host window is presented at least once per DMG frame even while the game
 disables the LCD. This keeps macroquad input polling alive during scene and
 battle transitions that do not produce an emulated VBlank.
@@ -148,10 +169,19 @@ Headless diagnostics accept `--trace` to enable the CPU instruction/state trace
 and print CGB mode, KEY1, and double-speed state in the final report. Use this
 selectively because instruction traces become large quickly.
 
+Focused cartridge persistence coverage is part of the default `cargo test`
+suite. It covers clean first boot without file creation, MBC3 SRAM bank
+round-trip, exact-size `.sav` behavior for normal/truncated/oversized files,
+non-battery cartridges staying disk-silent, atomic dirty flush behavior, and
+MBC3 RTC sidecar restoration including halted-clock handling.
+
 ## References
 
 - Pan Docs: memory map, boot ROM handoff, and serial `FF01`/`FF02` behavior.
   <https://gbdev.io/pandocs/>
+- Pan Docs cartridge header and MBC3 RTC details.
+  <https://gbdev.io/pandocs/The_Cartridge_Header.html>
+  <https://gbdev.io/pandocs/MBC3.html>
 - Pan Docs audio registers and timing details.
   <https://gbdev.io/pandocs/Audio_Registers.html>
   <https://gbdev.io/pandocs/Audio_details.html>

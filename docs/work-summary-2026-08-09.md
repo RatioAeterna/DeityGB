@@ -585,6 +585,94 @@ nix develop --command cargo test --release --test headless \
   blargg_sound_core_roms_pass -- --ignored --exact
 ```
 
+## Battery-Backed Cartridge Saves and MBC3 RTC Persistence
+
+This work adds normal cartridge persistence for games such as Pokemon Red and
+Pokemon Silver. It is deliberately not an emulator save-state feature: only the
+external cartridge RAM and MBC3 RTC state that real battery-backed cartridges
+retain across power cycles are written to disk.
+
+### File Ownership and Format
+
+Persistence is owned by `cartridge_save`, not by the CPU, PPU, frontend loop, or
+headless runner. The MMU remains the owner of cartridge-visible state: external
+RAM bytes, MBC bank registers, RTC registers, latched RTC values, halt/carry
+bits, and dirty flags. The save layer owns host paths, startup loading, atomic
+file replacement, and shutdown/debounce flushing.
+
+Save paths are derived only from the selected ROM path. DeityGB does not scan
+directories and does not discover unrelated legacy saves. A ROM
+`pokemon_silver.gbc` maps to adjacent files:
+
+- `pokemon_silver.sav`: raw cartridge SRAM only.
+- `pokemon_silver.rtc`: DeityGB's versioned MBC3 RTC sidecar.
+
+The raw `.sav` file is exactly the RAM size declared by the cartridge header
+RAM-size byte. For Pokemon Silver (`0147=10`, `0149=03`) this is 32 KiB, four
+8 KiB banks. Pokemon Crystal uses the same MBC3 timer/RAM/battery cartridge
+type with RAM-size code `05`, the MBC30-style 64 KiB variant with eight SRAM
+banks. Banks `00-07` are treated as cartridge RAM and banks `08-0C` remain the
+RTC register window. Keeping RTC out of `.sav` preserves interoperability with
+tools that expect the file to contain only cartridge RAM.
+
+The `.rtc` sidecar is a small text format beginning with
+`DEITYGB_MBC3_RTC_V1`. It stores the five MBC3 RTC registers, the sub-second
+cycle accumulator, and the host Unix timestamp at flush time. On load, elapsed
+host seconds are applied if the RTC halt bit is clear. If the halt bit is set,
+the clock remains stopped. Day bit 8 and the carry bit live in RTC register
+`0C` as Pan Docs specifies; overflow wraps the 9-bit day counter and sets carry
+until software clears it by writing the register.
+
+### Lifecycle
+
+The macroquad frontend and headless runner load the ROM first, then initialize
+cartridge persistence exactly once from the resulting header metadata. This is
+important because battery/RAM/RTC eligibility comes from the cartridge header,
+not filenames or previous files on disk.
+
+Missing save files are normal and leave first boot pristine. No file is created
+until the emulated game actually writes cartridge RAM or RTC registers, or the
+running RTC advances and marks RTC state dirty. Truncated saves copy the bytes
+that exist and leave the rest of external RAM zeroed. Oversized saves copy only
+the declared RAM range and are rewritten to the declared size on the next dirty
+flush. Malformed RTC sidecars are ignored without panicking or corrupting RAM.
+
+Only cartridge types whose header declares a battery enable persistence. MBC3
+RAM without battery, for example, still has in-memory external RAM while the
+emulator runs, but the save manager stays disabled and never writes a `.sav`.
+
+### Flush Policy
+
+Cartridge RAM writes through `A000-BFFF` mark RAM dirty after the active MBC has
+resolved enable state and bank selection. MBC3 RTC register writes mark RTC
+state dirty; ordinary elapsed RTC seconds are restored from the sidecar's host
+timestamp rather than forcing repeated disk writes while a game is merely
+running. The frontend checks dirty state on a one-second debounce and on
+shutdown. The headless runner flushes once before exit.
+
+Flushes use a temporary file beside the target followed by `rename`, so a crash
+or interruption should leave either the old complete save or the new complete
+save. Ordinary frames, idle loops, and gameplay without cartridge RAM/RTC
+changes do not write to disk.
+
+### Verification
+
+The default integration suite now includes focused persistence regressions:
+
+- Clean battery first boot does not create a save file.
+- MBC3 SRAM banks round-trip through `.sav`.
+- Pokemon Crystal's MBC30-style banks 4-7 round-trip before the RTC register
+  window.
+- Saved RAM length is exactly the cartridge header's declared size.
+- Truncated and oversized `.sav` files load safely and rewrite to declared size.
+- Non-battery cartridges do not persist external RAM.
+- Dirty flushes are atomic and clear dirty state.
+- MBC3 RTC sidecars round-trip, apply elapsed host time, and respect halt.
+
+The design follows Pan Docs cartridge header, external RAM, and MBC3 RTC
+documentation, plus the project's existing MBC tests. No implementation from
+another Game Boy emulator was searched for or copied.
+
 ## Blargg CPU/Memory Timing and DMG OAM Checkpoint
 
 This checkpoint broadens DeityGB's verification from instruction results and

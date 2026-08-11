@@ -1,12 +1,15 @@
 use deitygb::apu::APU;
+use deitygb::cartridge_save::CartridgeSave;
 use deitygb::cpu::CPU;
 use deitygb::headless::{
     default_boot_rom_path, load_file, GameBoy, TestOutcome, DMG_CPU_FREQUENCY, DMG_FRAME_CYCLES,
 };
 use deitygb::mmu::{JoypadButton, MMU};
-use deitygb::ppu::{PPU, Sprite};
+use deitygb::ppu::{Sprite, PPU};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn repo_path(path: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(path)
@@ -21,6 +24,31 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 fn cgb_test_rom() -> Vec<u8> {
     let mut rom = vec![0; 0x8000];
     rom[0x0143] = 0x80;
+    rom
+}
+
+fn temp_rom_path(name: &str) -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir =
+        std::env::temp_dir().join(format!("deitygb-save-test-{}-{nonce}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    dir.join(name)
+}
+
+fn mbc3_battery_ram_rom() -> Vec<u8> {
+    let mut rom = vec![0; 0x8000];
+    rom[0x0147] = 0x10;
+    rom[0x0148] = 0x00;
+    rom[0x0149] = 0x03;
+    rom
+}
+
+fn mbc3_crystal_battery_ram_rom() -> Vec<u8> {
+    let mut rom = mbc3_battery_ram_rom();
+    rom[0x0149] = 0x05;
     rom
 }
 
@@ -196,8 +224,20 @@ fn offscreen_sprite_coordinates_do_not_overflow() {
     mmu.set_raw_byte(0xFF40, 0x02);
     mmu.set_raw_byte(0xFF44, 0);
 
-    assert!(ppu.sprite_on_scanline(&Sprite { y: 9, ..Sprite::default() }, &mut mmu));
-    assert!(!ppu.sprite_on_scanline(&Sprite { y: 0, ..Sprite::default() }, &mut mmu));
+    assert!(ppu.sprite_on_scanline(
+        &Sprite {
+            y: 9,
+            ..Sprite::default()
+        },
+        &mut mmu
+    ));
+    assert!(!ppu.sprite_on_scanline(
+        &Sprite {
+            y: 0,
+            ..Sprite::default()
+        },
+        &mut mmu
+    ));
 }
 
 #[test]
@@ -416,6 +456,200 @@ fn mbc3_rtc_ticks_halts_and_latches() {
 }
 
 #[test]
+fn battery_save_clean_boot_does_not_create_file_until_dirty() {
+    let rom_path = temp_rom_path("clean.gbc");
+    let rom = mbc3_battery_ram_rom();
+    let mut mmu = MMU::new();
+    mmu.load_rom(&rom);
+    let mut save = CartridgeSave::for_rom_path(&rom_path);
+
+    let report = save.load_after_rom_at(&mut mmu, 1_000);
+    assert!(report.enabled);
+    assert_eq!(save.save_path(), rom_path.with_extension("sav"));
+    assert!(!save.save_path().exists());
+    assert!(!save.flush_if_dirty_at(&mut mmu, 1_000).unwrap());
+    assert!(!save.save_path().exists());
+}
+
+#[test]
+fn battery_sram_banks_round_trip_with_exact_declared_size() {
+    let rom_path = temp_rom_path("silver.gbc");
+    let rom = mbc3_battery_ram_rom();
+    let mut mmu = MMU::new();
+    mmu.load_rom(&rom);
+    let mut save = CartridgeSave::for_rom_path(&rom_path);
+    save.load_after_rom_at(&mut mmu, 1_000);
+
+    mmu.set_byte(0x0000, 0x0A);
+    mmu.set_byte(0x4000, 0);
+    mmu.set_byte(0xA123, 0x11);
+    mmu.set_byte(0x4000, 3);
+    mmu.set_byte(0xA123, 0x33);
+    assert!(save.flush_if_dirty_at(&mut mmu, 1_001).unwrap());
+    assert_eq!(fs::metadata(save.save_path()).unwrap().len(), 4 * 8192);
+    assert!(!save.save_path().with_extension("sav.tmp").exists());
+    assert!(!save.flush_if_dirty_at(&mut mmu, 1_002).unwrap());
+
+    let mut loaded = MMU::new();
+    loaded.load_rom(&rom);
+    let mut loaded_save = CartridgeSave::for_rom_path(&rom_path);
+    loaded_save.load_after_rom_at(&mut loaded, 1_003);
+    loaded.set_byte(0x0000, 0x0A);
+    loaded.set_byte(0x4000, 0);
+    assert_eq!(loaded.get_byte(0xA123), 0x11);
+    loaded.set_byte(0x4000, 3);
+    assert_eq!(loaded.get_byte(0xA123), 0x33);
+}
+
+#[test]
+fn mbc3_crystal_uses_all_eight_sram_banks_before_rtc_registers() {
+    let rom_path = temp_rom_path("crystal.gbc");
+    let rom = mbc3_crystal_battery_ram_rom();
+    let mut mmu = MMU::new();
+    mmu.load_rom(&rom);
+    let mut save = CartridgeSave::for_rom_path(&rom_path);
+    save.load_after_rom_at(&mut mmu, 1_000);
+
+    mmu.set_byte(0x0000, 0x0A);
+    mmu.set_byte(0x4000, 0);
+    mmu.set_byte(0xA456, 0x10);
+    mmu.set_byte(0x4000, 7);
+    mmu.set_byte(0xA456, 0x77);
+    mmu.set_byte(0x4000, 0x08);
+    mmu.set_byte(0xA000, 12);
+
+    assert!(save.flush_if_dirty_at(&mut mmu, 1_001).unwrap());
+    assert_eq!(fs::metadata(save.save_path()).unwrap().len(), 8 * 8192);
+    assert!(save.rtc_path().exists());
+
+    let mut loaded = MMU::new();
+    loaded.load_rom(&rom);
+    let mut loaded_save = CartridgeSave::for_rom_path(&rom_path);
+    loaded_save.load_after_rom_at(&mut loaded, 1_001);
+    loaded.set_byte(0x0000, 0x0A);
+    loaded.set_byte(0x4000, 0);
+    assert_eq!(loaded.get_byte(0xA456), 0x10);
+    loaded.set_byte(0x4000, 7);
+    assert_eq!(loaded.get_byte(0xA456), 0x77);
+    loaded.set_byte(0x4000, 0x08);
+    assert_eq!(loaded.get_byte(0xA000), 12);
+}
+
+#[test]
+fn non_battery_cartridge_never_persists_external_ram() {
+    let rom_path = temp_rom_path("volatile.gbc");
+    let mut rom = mbc3_battery_ram_rom();
+    rom[0x0147] = 0x12;
+    let mut mmu = MMU::new();
+    mmu.load_rom(&rom);
+    let mut save = CartridgeSave::for_rom_path(&rom_path);
+    let report = save.load_after_rom_at(&mut mmu, 1_000);
+
+    mmu.set_byte(0x0000, 0x0A);
+    mmu.set_byte(0xA000, 0x44);
+    assert!(!report.enabled);
+    assert!(!save.flush_if_dirty_at(&mut mmu, 1_001).unwrap());
+    assert!(!save.save_path().exists());
+}
+
+#[test]
+fn truncated_and_oversized_saves_load_without_changing_declared_flush_size() {
+    let rom_path = temp_rom_path("odd-size.gbc");
+    let rom = mbc3_battery_ram_rom();
+
+    fs::write(rom_path.with_extension("sav"), [0xAA; 16]).unwrap();
+    let mut truncated = MMU::new();
+    truncated.load_rom(&rom);
+    let mut save = CartridgeSave::for_rom_path(&rom_path);
+    save.load_after_rom_at(&mut truncated, 1_000);
+    truncated.set_byte(0x0000, 0x0A);
+    assert_eq!(truncated.get_byte(0xA000), 0xAA);
+    assert_eq!(truncated.get_byte(0xA010), 0x00);
+
+    fs::write(rom_path.with_extension("sav"), vec![0x55; (4 * 8192) + 9]).unwrap();
+    let mut oversized = MMU::new();
+    oversized.load_rom(&rom);
+    let mut oversized_save = CartridgeSave::for_rom_path(&rom_path);
+    oversized_save.load_after_rom_at(&mut oversized, 1_000);
+    oversized.set_byte(0x0000, 0x0A);
+    assert_eq!(oversized.get_byte(0xA000), 0x55);
+    oversized.set_byte(0xA000, 0x66);
+    oversized_save
+        .flush_if_dirty_at(&mut oversized, 1_001)
+        .unwrap();
+    assert_eq!(
+        fs::metadata(oversized_save.save_path()).unwrap().len(),
+        4 * 8192
+    );
+}
+
+#[test]
+fn mbc3_rtc_sidecar_round_trips_and_applies_elapsed_host_time() {
+    let rom_path = temp_rom_path("clock.gbc");
+    let rom = mbc3_battery_ram_rom();
+    let mut mmu = MMU::new();
+    mmu.load_rom(&rom);
+    let mut save = CartridgeSave::for_rom_path(&rom_path);
+    save.load_after_rom_at(&mut mmu, 1_000);
+
+    mmu.set_byte(0x0000, 0x0A);
+    mmu.set_byte(0x4000, 0x08);
+    mmu.set_byte(0xA000, 58);
+    mmu.set_byte(0x4000, 0x09);
+    mmu.set_byte(0xA000, 59);
+    mmu.set_byte(0x4000, 0x0A);
+    mmu.set_byte(0xA000, 23);
+    mmu.set_byte(0x4000, 0x0B);
+    mmu.set_byte(0xA000, 0xFF);
+    mmu.set_byte(0x4000, 0x0C);
+    mmu.set_byte(0xA000, 0x00);
+    assert!(save.flush_if_dirty_at(&mut mmu, 1_000).unwrap());
+    assert!(save.rtc_path().exists());
+
+    let mut loaded = MMU::new();
+    loaded.load_rom(&rom);
+    let mut loaded_save = CartridgeSave::for_rom_path(&rom_path);
+    loaded_save.load_after_rom_at(&mut loaded, 1_003);
+    loaded.set_byte(0x0000, 0x0A);
+    loaded.set_byte(0x4000, 0x08);
+    assert_eq!(loaded.get_byte(0xA000), 1);
+    loaded.set_byte(0x4000, 0x09);
+    assert_eq!(loaded.get_byte(0xA000), 0);
+    loaded.set_byte(0x4000, 0x0A);
+    assert_eq!(loaded.get_byte(0xA000), 0);
+    loaded.set_byte(0x4000, 0x0B);
+    assert_eq!(loaded.get_byte(0xA000), 0);
+    loaded.set_byte(0x4000, 0x0C);
+    assert_eq!(loaded.get_byte(0xA000) & 0x01, 1);
+}
+
+#[test]
+fn mbc3_halted_rtc_sidecar_does_not_advance_during_host_elapsed_time() {
+    let rom_path = temp_rom_path("halted-clock.gbc");
+    let rom = mbc3_battery_ram_rom();
+    let mut mmu = MMU::new();
+    mmu.load_rom(&rom);
+    let mut save = CartridgeSave::for_rom_path(&rom_path);
+    save.load_after_rom_at(&mut mmu, 1_000);
+    mmu.set_byte(0x0000, 0x0A);
+    mmu.set_byte(0x4000, 0x08);
+    mmu.set_byte(0xA000, 10);
+    mmu.set_byte(0x4000, 0x0C);
+    mmu.set_byte(0xA000, 0x40);
+    save.flush_if_dirty_at(&mut mmu, 1_000).unwrap();
+
+    let mut loaded = MMU::new();
+    loaded.load_rom(&rom);
+    let mut loaded_save = CartridgeSave::for_rom_path(&rom_path);
+    loaded_save.load_after_rom_at(&mut loaded, 9_000);
+    loaded.set_byte(0x0000, 0x0A);
+    loaded.set_byte(0x4000, 0x08);
+    assert_eq!(loaded.get_byte(0xA000), 10);
+    loaded.set_byte(0x4000, 0x0C);
+    assert_eq!(loaded.get_byte(0xA000) & 0x40, 0x40);
+}
+
+#[test]
 #[ignore = "runs the local DMG Acid2 ROM and checks the complete reference image"]
 fn dmg_acid2_matches_reference_layout() {
     let rom = load_file(&repo_path("src/roms/dmg-acid2.gb")).unwrap();
@@ -544,20 +778,33 @@ fn blargg_cpu_instrs_completes_with_serial_result() {
     gb.load_rom(&rom);
 
     let report = gb.run_until(DMG_CPU_FREQUENCY * 120);
-    assert_ne!(report.outcome, TestOutcome::Timeout, "serial: {}", String::from_utf8_lossy(&report.serial));
+    assert_ne!(
+        report.outcome,
+        TestOutcome::Timeout,
+        "serial: {}",
+        String::from_utf8_lossy(&report.serial)
+    );
 }
 
 #[test]
 #[ignore = "runs bundled Mooneye acceptance ROM; use for emulator regression checks"]
 fn mooneye_daa_reports_pass_or_fail() {
-    let rom = load_file(&repo_path("src/roms/mts-20240926-1737-443f6e1/acceptance/instr/daa.gb")).unwrap();
+    let rom = load_file(&repo_path(
+        "src/roms/mts-20240926-1737-443f6e1/acceptance/instr/daa.gb",
+    ))
+    .unwrap();
     let boot = load_file(&default_boot_rom_path()).unwrap();
     let mut gb = GameBoy::new();
     gb.load_boot_rom(&boot);
     gb.load_rom(&rom);
 
     let report = gb.run_until(DMG_CPU_FREQUENCY * 30);
-    assert_ne!(report.outcome, TestOutcome::Timeout, "serial: {:?}", report.serial);
+    assert_ne!(
+        report.outcome,
+        TestOutcome::Timeout,
+        "serial: {:?}",
+        report.serial
+    );
 }
 
 #[test]

@@ -7,9 +7,18 @@ use std::env;
 use std::path::PathBuf;
 
 fn parse_button_event(value: &str) -> (u64, JoypadButton, u64) {
-    let (event, frames) = value.split_once('/').map_or((value, None), |(event, frames)| {
-        (event, Some(frames.parse::<u64>().expect("tap length must be a frame count")))
-    });
+    let (event, frames) = value
+        .split_once('/')
+        .map_or((value, None), |(event, frames)| {
+            (
+                event,
+                Some(
+                    frames
+                        .parse::<u64>()
+                        .expect("tap length must be a frame count"),
+                ),
+            )
+        });
     let (button, second) = event
         .split_once('@')
         .expect("--press must use BUTTON@SECOND[/FRAMES], for example start@35 or left@180/4");
@@ -24,7 +33,9 @@ fn parse_button_event(value: &str) -> (u64, JoypadButton, u64) {
         "start" => JoypadButton::Start,
         _ => panic!("unknown button: {}", button),
     };
-    let second = second.parse().expect("button event second must be an integer");
+    let second = second
+        .parse()
+        .expect("button event second must be an integer");
     let duration = frames.map_or(DMG_CPU_FREQUENCY, |frames| frames * DMG_FRAME_CYCLES);
     (second, button, duration)
 }
@@ -60,11 +71,15 @@ fn main() {
                 boot_path = None;
             }
             "--dump-frame" => {
-                dump_frame = Some(PathBuf::from(args.next().expect("--dump-frame requires a path")));
+                dump_frame = Some(PathBuf::from(
+                    args.next().expect("--dump-frame requires a path"),
+                ));
             }
             "--press-start-at" => {
                 let value = args.next().expect("--press-start-at requires a value");
-                let second = value.parse::<u64>().expect("--press-start-at must be an integer");
+                let second = value
+                    .parse::<u64>()
+                    .expect("--press-start-at must be an integer");
                 input_events.push((second, JoypadButton::Start, DMG_CPU_FREQUENCY));
             }
             "--press" => {
@@ -87,7 +102,6 @@ fn main() {
         }
     }
 
-    let rom = load_file(&rom_path).expect("failed to read ROM");
     let mut gb = GameBoy::new();
     gb.set_apu_enabled(apu_enabled);
     gb.set_force_dmg(force_dmg);
@@ -96,7 +110,20 @@ fn main() {
         let boot = load_file(&path).expect("failed to read boot ROM");
         gb.load_boot_rom(&boot);
     }
-    gb.load_rom(&rom);
+    let save_report = gb
+        .load_rom_from_path(&rom_path)
+        .expect("failed to read ROM");
+    if save_report.enabled {
+        if let Some(path) = &save_report.save_path {
+            println!("save-path: {}", path.display());
+        }
+        if let Some(path) = &save_report.rtc_path {
+            println!("rtc-path: {}", path.display());
+        }
+    }
+    for message in &save_report.messages {
+        println!("save: {}", message);
+    }
 
     let total_cycles = DMG_CPU_FREQUENCY * seconds;
     input_events.sort_by_key(|(second, _, _)| *second);
@@ -171,6 +198,12 @@ fn main() {
         let rgba = gb.framebuffer_rgba();
         write_ppm(&path, &rgba).expect("failed to write frame dump");
         println!("frame: {}", path.display());
+    }
+
+    match gb.flush_save_if_dirty() {
+        Ok(true) => println!("save: flushed dirty cartridge persistence"),
+        Ok(false) => {}
+        Err(error) => eprintln!("save: failed to flush cartridge persistence: {}", error),
     }
 
     if report.outcome == TestOutcome::Failed {
