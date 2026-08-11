@@ -34,7 +34,7 @@ fn main() {
     let rom_path = match args.next() {
         Some(path) => PathBuf::from(path),
         None => {
-            eprintln!("usage: gb-headless <rom.gb> [--seconds N] [--boot path] [--dump-frame path.ppm] [--press BUTTON@SECOND] [--no-apu]");
+            eprintln!("usage: gb-headless <rom.gb> [--seconds N] [--boot path] [--dump-frame path.ppm] [--press BUTTON@SECOND] [--no-apu] [--dmg] [--trace]");
             std::process::exit(2);
         }
     };
@@ -44,6 +44,8 @@ fn main() {
     let mut dump_frame = None;
     let mut input_events = Vec::new();
     let mut apu_enabled = true;
+    let mut force_dmg = false;
+    let mut trace = false;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -72,6 +74,12 @@ fn main() {
             "--no-apu" => {
                 apu_enabled = false;
             }
+            "--dmg" => {
+                force_dmg = true;
+            }
+            "--trace" => {
+                trace = true;
+            }
             _ => {
                 eprintln!("unknown argument: {}", arg);
                 std::process::exit(2);
@@ -82,6 +90,8 @@ fn main() {
     let rom = load_file(&rom_path).expect("failed to read ROM");
     let mut gb = GameBoy::new();
     gb.set_apu_enabled(apu_enabled);
+    gb.set_force_dmg(force_dmg);
+    gb.cpu.set_trace_enabled(trace);
     if let Some(path) = boot_path {
         let boot = load_file(&path).expect("failed to read boot ROM");
         gb.load_boot_rom(&boot);
@@ -118,7 +128,7 @@ fn main() {
     }
     let pc = gb.cpu.program_counter();
     println!(
-        "state: bank={:#04x} pc={:#06x} sp={:#06x} hl={:#06x} de={:#06x} halted={} ime={} lcdc={:#04x} stat={:#04x} ly={} lyc={} ie={:#04x} if={:#04x} div={:#06x} tima={:#04x} tma={:#04x} tac={:#04x} joyp={:#04x} ff8b={:#04x} ff8c={:#04x} ff8e={:#04x} ff94={:#04x} d03b={:#04x} bgp={:#04x} scx={} scy={}",
+        "state: bank={:#04x} pc={:#06x} sp={:#06x} hl={:#06x} de={:#06x} halted={} ime={} cgb={} double_speed={} key1={:#04x} lcdc={:#04x} stat={:#04x} ly={} lyc={} ie={:#04x} if={:#04x} div={:#06x} tima={:#04x} tma={:#04x} tac={:#04x} joyp={:#04x} ff8b={:#04x} ff8c={:#04x} ff8e={:#04x} ff94={:#04x} d03b={:#04x} bgp={:#04x} scx={} scy={}",
         gb.mmu.mapped_rom_bank(pc),
         pc,
         gb.cpu.stack_pointer(),
@@ -126,6 +136,9 @@ fn main() {
         gb.cpu.de(),
         gb.cpu.is_halted(),
         gb.cpu.interrupts_enabled(),
+        gb.mmu.cgb_mode(),
+        gb.mmu.double_speed(),
+        gb.mmu.get_byte(0xFF4D),
         gb.mmu.get_byte(0xFF40),
         gb.mmu.get_byte(0xFF41),
         gb.mmu.get_byte(0xFF44),

@@ -105,9 +105,22 @@ title screen through file selection into Marin's opening house dialogue:
 nix develop --command cargo test --release --test headless links_awakening_dx_reaches_opening_dialogue -- --ignored --exact
 ```
 
-The bundled Blargg `cpu_instrs` ROM passes all 11 groups. The cycle-exact
-`interrupt_time` ROM still reports failure and tracks remaining timer/bus
-interrupt precision work.
+The bundled Blargg `cpu_instrs` ROM passes all 11 groups. The `instr_timing`,
+both `mem_timing` generations, and cycle-exact `interrupt_time` ROMs also pass.
+`interrupt_time` validates the documented interrupt entry in both normal and
+CGB double-speed operation.
+
+The DMG-only OAM corruption suite must be run with `--dmg`, because its ROM
+header also permits CGB hardware and CGB hardware does not exhibit the bug:
+
+```sh
+nix develop --command cargo run --release --bin gb-headless -- \
+  src/roms/gb-test-roms/oam_bug/oam_bug.gb --seconds 120 --no-apu --dmg
+```
+
+All eight OAM groups pass. The standalone `halt_bug.gb` remains the only known
+failing bundled Blargg ROM. Basic opcode-byte reuse after HALT is covered by a
+unit test, but the complete pending-interrupt matrix remains follow-up work.
 
 ## ROM-Suite Regression Tests
 
@@ -130,6 +143,10 @@ The current sound baseline is 12/12 DMG and 12/12 CGB. The aggregate runs every
 single ROM in both bundled sound suites, including frame-sequencer power timing,
 DMG/CGB length persistence, active wave-RAM arbitration, and DMG wave-retrigger
 corruption. A failure prints the suite, ROM name, and Blargg memory diagnostic.
+
+Headless diagnostics accept `--trace` to enable the CPU instruction/state trace
+and print CGB mode, KEY1, and double-speed state in the final report. Use this
+selectively because instruction traces become large quickly.
 
 ## References
 

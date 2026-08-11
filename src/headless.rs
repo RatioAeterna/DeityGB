@@ -66,6 +66,10 @@ impl GameBoy {
         self.mmu.load_rom(&rom.to_vec());
     }
 
+    pub fn set_force_dmg(&mut self, force_dmg: bool) {
+        self.mmu.set_force_dmg(force_dmg);
+    }
+
     pub fn step(&mut self) -> u8 {
         if self.ppu.reached_oam() && self.rendered_this_frame {
             self.rendered_this_frame = false;

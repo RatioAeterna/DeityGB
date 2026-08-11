@@ -27,8 +27,17 @@ fn cgb_test_rom() -> Vec<u8> {
 #[test]
 fn serial_transfer_records_internal_clock_byte() {
     let mut mmu = MMU::new();
+    let mut cpu = CPU::new();
     mmu.set_byte(0xFF01, b'P');
     mmu.set_byte(0xFF02, 0x81);
+
+    assert!(mmu.serial_output().is_empty());
+    assert_ne!(mmu.get_byte(0xFF02) & 0x80, 0);
+    cpu.update_timers(255, &mut mmu);
+    for _ in 0..15 {
+        cpu.update_timers(255, &mut mmu);
+    }
+    cpu.update_timers(16, &mut mmu);
 
     assert_eq!(mmu.serial_output(), b"P");
     assert_eq!(mmu.get_byte(0xFF01), 0xFF);
@@ -261,6 +270,48 @@ fn interrupt_after_halt_is_serviced_before_cb_prefix_fetch() {
     assert_eq!(cpu.program_counter(), 0x0040);
     assert_eq!(mmu.get_raw_byte(0xFFFE), 0x03);
     assert_eq!(mmu.get_raw_byte(0xFFFF), 0x00);
+}
+
+#[test]
+fn halt_bug_reuses_next_opcode_byte_as_immediate() {
+    let mut mmu = MMU::new();
+    let mut cpu = CPU::new();
+    mmu.set_raw_byte(0xFF50, 1);
+    mmu.set_raw_byte(0x0000, 0x76); // HALT with IME clear and interrupt pending.
+    mmu.set_raw_byte(0x0001, 0x3E); // LD A,d8; opcode is read twice by the bug.
+    mmu.set_raw_byte(0x0002, 0x12);
+    mmu.set_raw_byte(0xFFFF, 0x01);
+    mmu.set_if(0x01);
+
+    assert_eq!(cpu.cycle(&mut mmu), 4);
+    assert!(!cpu.is_halted());
+    assert_eq!(cpu.program_counter(), 0x0001);
+
+    assert_eq!(cpu.cycle(&mut mmu), 8);
+    assert_eq!(cpu.accumulator(), 0x3E);
+    assert_eq!(cpu.program_counter(), 0x0002);
+}
+
+#[test]
+fn tima_overflow_reloads_and_requests_interrupt_one_machine_cycle_later() {
+    let mut mmu = MMU::new();
+    let mut cpu = CPU::new();
+    mmu.set_raw_byte(0xFF05, 0xFF);
+    mmu.set_raw_byte(0xFF06, 0x42);
+    mmu.set_raw_byte(0xFF07, 0x05); // Enabled, divider bit 3.
+    mmu.div_internal = 0x000F;
+
+    cpu.update_timers(1, &mut mmu);
+    assert_eq!(mmu.get_byte(0xFF05), 0x00);
+    assert_eq!(mmu.get_if() & 0x04, 0);
+
+    cpu.update_timers(3, &mut mmu);
+    assert_eq!(mmu.get_byte(0xFF05), 0x00);
+    assert_eq!(mmu.get_if() & 0x04, 0);
+
+    cpu.update_timers(1, &mut mmu);
+    assert_eq!(mmu.get_byte(0xFF05), 0x42);
+    assert_eq!(mmu.get_if() & 0x04, 0x04);
 }
 
 #[test]

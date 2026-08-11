@@ -516,7 +516,7 @@ pub struct CPU {
         trace_enabled: bool,
 
         halt_bug_enabled: bool,
-        halt_bug_stuck_pc: u16,
+        timer_cycles_advanced: u8,
 
         dis : Disassembler,
 
@@ -541,7 +541,7 @@ impl CPU  {
                 di_pending : false,
                 trace_enabled: false,
                 halt_bug_enabled: false,
-                halt_bug_stuck_pc: 0,
+                timer_cycles_advanced: 0,
                 dis : Disassembler::from_csv(),
         }
     }
@@ -652,10 +652,14 @@ impl CPU  {
 
     // pushes a value onto the stack, decrements sp
     fn stack_push(&mut self, mmu_ref : &mut mmu::MMU, val : u16) {
-        let mut sp = self.get_sp().wrapping_sub(1);
+        let old_sp = self.get_sp();
+        mmu_ref.trigger_oam_idu_corruption_at(old_sp, 0);
+        let mut sp = old_sp.wrapping_sub(1);
+        mmu_ref.trigger_oam_write_corruption_at(sp, 4);
         mmu_ref.set_byte(sp as usize, (val >> 8) as u8); // high byte
 
         sp = sp.wrapping_sub(1);
+        mmu_ref.trigger_oam_write_corruption_at(sp, 8);
         mmu_ref.set_byte(sp as usize, (val & 0xFF) as u8); // low byte
 
         //println!("STACK PUSH! {:#04x}", val);
@@ -667,9 +671,11 @@ impl CPU  {
         let mut sp = self.get_sp() as usize;
         //println!("sp_val: {:#04x}", self.get_sp());
 
+        mmu_ref.trigger_oam_read_idu_corruption_at(sp as u16, 0);
         let low_byte = mmu_ref.get_byte(sp);
         sp = sp.wrapping_add(1);
 
+        mmu_ref.trigger_oam_read_corruption_at(sp as u16, 4);
         let high_byte = mmu_ref.get_byte(sp);
         sp = sp.wrapping_add(1);
 
@@ -693,6 +699,8 @@ impl CPU  {
 
         // TODO too many function calls but whatever for now
         for i in 0..t_cycles {
+            mmu_ref.tick_tima_reload();
+            mmu_ref.tick_serial();
             let old_div : u16 = mmu_ref.fetch_div();
             mmu_ref.increment_div(1);
             let new_div : u16 = mmu_ref.fetch_div();
@@ -714,6 +722,23 @@ impl CPU  {
         // write to TMA on the same cycle that you overflow TIMA
     }
 
+    fn advance_timers_to(&mut self, target: u8, mmu_ref: &mut mmu::MMU) {
+        if target > self.timer_cycles_advanced {
+            self.update_timers(target - self.timer_cycles_advanced, mmu_ref);
+            self.timer_cycles_advanced = target;
+        }
+    }
+
+    fn timed_read(&mut self, mmu_ref: &mut mmu::MMU, addr: usize, at_cycle: u8) -> u8 {
+        self.advance_timers_to(at_cycle, mmu_ref);
+        mmu_ref.get_byte(addr)
+    }
+
+    fn timed_write(&mut self, mmu_ref: &mut mmu::MMU, addr: usize, data: u8, at_cycle: u8) {
+        self.advance_timers_to(at_cycle, mmu_ref);
+        mmu_ref.set_byte(addr, data);
+    }
+
     fn service_interrupt(&mut self, pending_interrupts: u8, mmu_ref: &mut mmu::MMU) -> u8 {
         let interrupt_vectors = [0x40, 0x48, 0x50, 0x58, 0x60];
         let interrupt = (0..5)
@@ -725,12 +750,11 @@ impl CPU  {
         mmu_ref.set_if(interrupt_flags & !mask);
         self.ime = false;
         self.set_sp(self.get_sp().wrapping_sub(1));
-        mmu_ref.set_byte(self.get_sp() as usize, (self.pc >> 8) as u8);
+        self.timed_write(mmu_ref, self.get_sp() as usize, (self.pc >> 8) as u8, 8);
         self.set_sp(self.get_sp().wrapping_sub(1));
-        mmu_ref.set_byte(self.get_sp() as usize, (self.pc & 0xFF) as u8);
+        self.timed_write(mmu_ref, self.get_sp() as usize, (self.pc & 0xFF) as u8, 12);
         self.pc = interrupt_vectors[interrupt];
         self.halt_bug_enabled = false;
-        self.halt_bug_stuck_pc = 0;
 
         20
     }
@@ -738,6 +762,7 @@ impl CPU  {
 
     // performs a F/D/E/WB cycle
     pub fn cycle(&mut self, mmu_ref : &mut mmu::MMU) -> u8 {
+        self.timer_cycles_advanced = 0;
         if self.stop_flag {
             return 0;
         }
@@ -754,18 +779,32 @@ impl CPU  {
 
         if self.ime && pending_interrupts != 0 {
             let cycles = self.service_interrupt(pending_interrupts, mmu_ref);
-            self.update_timers(cycles, mmu_ref);
+            self.update_timers(cycles - self.timer_cycles_advanced, mmu_ref);
             return cycles;
         }
 
-        let next_opcode : u8; 
+        let next_opcode : u8;
+        let apply_halt_bug = self.halt_bug_enabled;
+        self.halt_bug_enabled = false;
 
         // check for 0xCB prefix
-        let cb_prefix : bool = self.fetch(self.pc, mmu_ref) == 0xCB;
+        let first_opcode = self.fetch(self.pc, mmu_ref);
+        let cb_prefix : bool = first_opcode == 0xCB;
         if cb_prefix {
-            self.pc += 1;
+            if !apply_halt_bug {
+                self.pc += 1;
+            }
+        } else if apply_halt_bug {
+            // HALT with IME clear and a pending interrupt suppresses the PC
+            // increment for the next opcode fetch. Model that by shifting the
+            // decoder's instruction origin back one byte after fetching it.
+            self.pc = self.pc.wrapping_sub(1);
         }
-        next_opcode = self.fetch(self.pc, mmu_ref);
+        next_opcode = if cb_prefix {
+            self.fetch(self.pc, mmu_ref)
+        } else {
+            first_opcode
+        };
 
         // disassemble and print the instruction we're looking at, for debugging purposes
         if self.trace_enabled {
@@ -789,7 +828,7 @@ impl CPU  {
             self.cgb_handoff_done = true;
         }
 
-        self.update_timers(cycles, mmu_ref);
+        self.update_timers(cycles - self.timer_cycles_advanced, mmu_ref);
 
         return cycles;
     }
@@ -833,6 +872,35 @@ impl CPU  {
             if cb_prefix {
                     // decrement to 'back up' once
                     self.pc = self.pc - 1;
+                    if opcode & 0x07 == 0x06 {
+                        let addr = self.get_hl() as usize;
+                        let bit = (opcode >> 3) & 0x07;
+                        let is_bit_test = (0x40..=0x7F).contains(&opcode);
+                        let read_cycle = if is_bit_test { cycles - 8 } else { cycles - 12 };
+                        let value = self.timed_read(mmu_ref, addr, read_cycle);
+                        let result = match opcode {
+                            0x00..=0x3F => Some(match bit {
+                                0 => rlc(value, &mut self.f),
+                                1 => rrc(value, &mut self.f),
+                                2 => rl(value, &mut self.f),
+                                3 => rr(value, &mut self.f),
+                                4 => sla(value, &mut self.f),
+                                5 => sra(value, &mut self.f),
+                                6 => swap(value, &mut self.f),
+                                7 => srl(value, &mut self.f),
+                                _ => unreachable!(),
+                            }),
+                            0x40..=0x7F => {
+                                test_bit(value, bit, &mut self.f);
+                                None
+                            },
+                            0x80..=0xBF => Some(value & !(1 << bit)),
+                            0xC0..=0xFF => Some(value | (1 << bit)),
+                        };
+                        if let Some(result) = result {
+                            self.timed_write(mmu_ref, addr, result, cycles - 8);
+                        }
+                    } else {
                     match opcode {
                             0x00 => self.b = rlc(self.b, &mut self.f),
                             0x01 => self.c = rlc(self.c, &mut self.f),
@@ -1098,13 +1166,18 @@ impl CPU  {
                                     panic!("Error: CB Invalid opcode!");
                             }
                     }
+                    }
             }
             else {
                     match opcode {
                             0x00 => (),
                             0x01 => ld_word(&mut self.b, &mut self.c, nn),
                             0x02 => mmu_ref.set_byte(self.get_bc() as usize, self.a),
-                            0x03 => self.set_bc(self.get_bc().wrapping_add(1)),
+                            0x03 => {
+                                let value = self.get_bc();
+                                mmu_ref.trigger_oam_idu_corruption(value);
+                                self.set_bc(value.wrapping_add(1));
+                            },
                             0x04 => self.b = inc_reg(self.b, &mut self.f),
                             0x05 => self.b = dec_reg(self.b, &mut self.f),
                             0x06 => self.b = n,
@@ -1123,6 +1196,7 @@ impl CPU  {
                             0x0A => self.a = mmu_ref.get_byte(self.get_bc() as usize),
                             0x0B => {
                                 let bc = self.get_bc();
+                                mmu_ref.trigger_oam_idu_corruption(bc);
                                 let new_bc = bc.wrapping_sub(1);
                                 self.set_bc(new_bc);
                             },
@@ -1138,7 +1212,11 @@ impl CPU  {
                             },
                             0x11 => self.set_de(nn),
                             0x12 => mmu_ref.set_byte(self.get_de() as usize, self.a),
-                            0x13 => self.set_de(self.get_de().wrapping_add(1)),
+                            0x13 => {
+                                let value = self.get_de();
+                                mmu_ref.trigger_oam_idu_corruption(value);
+                                self.set_de(value.wrapping_add(1));
+                            },
                             0x14 => self.d = inc_reg(self.d, &mut self.f),
                             0x15 => self.d = dec_reg(self.d, &mut self.f),
                             0x16 => self.d = n,
@@ -1153,6 +1231,7 @@ impl CPU  {
                             0x1A => self.a = mmu_ref.get_byte(self.get_de() as usize),
                             0x1B => {
                                 let de = self.get_de();
+                                mmu_ref.trigger_oam_idu_corruption(de);
                                 let new_de = de.wrapping_sub(1);
                                 self.set_de(new_de);
                             },
@@ -1170,9 +1249,14 @@ impl CPU  {
                             0x22 => { 
                                 let hl_val = self.get_hl(); 
                                 mmu_ref.set_byte(hl_val as usize, self.a);
+                                mmu_ref.trigger_oam_idu_corruption(hl_val);
                                 self.set_hl(hl_val.wrapping_add(1)); 
                             },
-                            0x23 => self.set_hl(self.get_hl().wrapping_add(1)),
+                            0x23 => {
+                                let value = self.get_hl();
+                                mmu_ref.trigger_oam_idu_corruption(value);
+                                self.set_hl(value.wrapping_add(1));
+                            },
                             0x24 => self.h = inc_reg(self.h, &mut self.f),
                             0x25 => self.h = dec_reg(self.h, &mut self.f),
                             0x26 => self.h = n,
@@ -1190,12 +1274,14 @@ impl CPU  {
                             },
                             0x2A => {
                                 let hl = self.get_hl();
+                                mmu_ref.trigger_oam_read_idu_corruption(hl);
                                 self.a = mmu_ref.get_byte(hl as usize);
                                 let new_hl = hl.wrapping_add(1);
                                 self.set_hl(new_hl);
                             },
                             0x2B => {
                                 let hl = self.get_hl();
+                                mmu_ref.trigger_oam_idu_corruption(hl);
                                 let new_hl = hl.wrapping_sub(1);
                                 self.set_hl(new_hl);
                             },
@@ -1213,21 +1299,28 @@ impl CPU  {
                             0x32 => { 
                                 let hl_val = self.get_hl(); 
                                 mmu_ref.set_byte(hl_val as usize, self.a);
+                                mmu_ref.trigger_oam_idu_corruption(hl_val);
                                 self.set_hl(hl_val.wrapping_sub(1));
                             },
-                            0x33 => self.set_sp(self.get_sp().wrapping_add(1)),
+                            0x33 => {
+                                let value = self.get_sp();
+                                mmu_ref.trigger_oam_idu_corruption(value);
+                                self.set_sp(value.wrapping_add(1));
+                            },
                             0x34 => {
-                                let at_hl = mmu_ref.get_byte(self.get_hl() as usize);
+                                let addr = self.get_hl() as usize;
+                                let at_hl = self.timed_read(mmu_ref, addr, cycles - 12);
                                 let new_at_hl = inc_reg(at_hl, &mut self.f);
-                                mmu_ref.set_byte(self.get_hl() as usize, new_at_hl);
+                                self.timed_write(mmu_ref, addr, new_at_hl, cycles - 8);
                             },
                             0x35 => {
-                                let at_hl = mmu_ref.get_byte(self.get_hl() as usize);
+                                let addr = self.get_hl() as usize;
+                                let at_hl = self.timed_read(mmu_ref, addr, cycles - 12);
                                 let new_at_hl = dec_reg(at_hl, &mut self.f);
-                                mmu_ref.set_byte(self.get_hl() as usize, new_at_hl);
+                                self.timed_write(mmu_ref, addr, new_at_hl, cycles - 8);
                             },
                             0x36 => {
-                                mmu_ref.set_byte(self.get_hl() as usize, n);
+                                self.timed_write(mmu_ref, self.get_hl() as usize, n, cycles - 8);
                             },
                             0x37 => scf(&mut self.f),
                             0x38 => {
@@ -1244,12 +1337,14 @@ impl CPU  {
                             },
                             0x3A => {
                                 let hl = self.get_hl();
+                                mmu_ref.trigger_oam_read_idu_corruption(hl);
                                 self.a = mmu_ref.get_byte(hl as usize);
                                 let new_hl = hl.wrapping_sub(1);
                                 self.set_hl(new_hl);
                             },
                             0x3B => {
                                 let sp = self.get_sp();
+                                mmu_ref.trigger_oam_idu_corruption(sp);
                                 let new_sp = sp.wrapping_sub(1);
                                 self.set_sp(new_sp);
                             },
@@ -1311,7 +1406,14 @@ impl CPU  {
                             0x73 => mmu_ref.set_byte(self.get_hl() as usize, self.e),
                             0x74 => mmu_ref.set_byte(self.get_hl() as usize, self.h),
                             0x75 => mmu_ref.set_byte(self.get_hl() as usize, self.l),
-                            0x76 => self.halt_flag = true,
+                            0x76 => {
+                                let pending = mmu_ref.get_ie() & mmu_ref.get_if() & 0x1F;
+                                if !self.ime && pending != 0 {
+                                    self.halt_bug_enabled = true;
+                                } else {
+                                    self.halt_flag = true;
+                                }
+                            },
                             0x77 => mmu_ref.set_byte(self.get_hl() as usize, self.a),
                             0x78 => self.a = self.b,
                             0x79 => self.a = self.c,
@@ -1540,7 +1642,7 @@ impl CPU  {
                                 self.pc = 0x18;
                                 skip_increment = true;
                             },
-                            0xE0 => mmu_ref.set_byte((0xFF00 + (n as u16)) as usize, self.a),
+                            0xE0 => self.timed_write(mmu_ref, (0xFF00 + (n as u16)) as usize, self.a, cycles - 8),
                             0xE1 => {let hl_val = self.stack_pop(mmu_ref); self.set_hl(hl_val);},
                             0xE2 => mmu_ref.set_byte((0xFF00 + (self.c as u16)) as usize, self.a),
                             0xE3 => (),
@@ -1573,7 +1675,7 @@ impl CPU  {
                                 self.set_sp(new_sp);
                             },
                             0xE9 => self.pc = self.get_hl() - (instruction_size as u16),
-                            0xEA => mmu_ref.set_byte(nn as usize, self.a),
+                            0xEA => self.timed_write(mmu_ref, nn as usize, self.a, cycles - 8),
                             0xEB => (),
                             0xEC => (),
                             0xED => (),
@@ -1583,7 +1685,7 @@ impl CPU  {
                                 self.pc = 0x28;
                                 skip_increment = true;
                             },
-                            0xF0 => self.a = mmu_ref.get_byte((0xFF00 + (n as u16) as usize)),
+                            0xF0 => self.a = self.timed_read(mmu_ref, 0xFF00 + n as usize, cycles - 8),
                             0xF1 => {let af_val = self.stack_pop(mmu_ref); self.set_af(af_val);},
                             0xF2 => self.a = mmu_ref.get_byte((0xFF00 + (self.c as u16) as usize)),
                             0xF3 => self.di_pending = true,
@@ -1614,7 +1716,7 @@ impl CPU  {
                                 let hl = self.get_hl(); 
                                 self.set_sp(hl);
                             },
-                            0xFA => self.a = mmu_ref.get_byte(nn as usize),
+                            0xFA => self.a = self.timed_read(mmu_ref, nn as usize, cycles - 8),
                             0xFB => self.ei_pending = true, 
                             0xFC => (),
                             0xFD => (),
@@ -1648,13 +1750,8 @@ impl CPU  {
     }
 
 
-    if !skip_increment && !self.halt_bug_enabled {
+    if !skip_increment {
         self.pc += instruction_size as u16;
-    }
-    //if self.pc != self.halt_bug_stuck_pc {
-    if self.halt_bug_enabled {
-        self.halt_bug_enabled = false;
-        self.halt_bug_stuck_pc = 0;
     }
 
     if mmu_ref.get_boot() != 0 && self.trace_enabled {

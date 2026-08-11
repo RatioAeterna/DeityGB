@@ -78,8 +78,10 @@ pub struct MMU {
         pub boot_rom : Vec<u8>,
         pub rom_data : Vec<u8>,
         pub div_internal: u16,
+        tima_reload_delay: u8,
 
         cgb_mode: bool,
+        force_dmg: bool,
         vram_bank: u8,
         vram_bank_1: Vec<u8>,
         wram_bank: u8,
@@ -97,6 +99,8 @@ pub struct MMU {
 
         pub vram_banned : bool,
         pub oam_banned : bool,
+        ppu_mode: u8,
+        ppu_mode_cycles: u16,
 
         pub joypad_state : u8,
         joypad_buttons: u8,
@@ -151,6 +155,8 @@ pub struct MMU {
         pub pcm34 : u8,
 
         serial_output : Vec<u8>,
+        serial_cycles_remaining: u16,
+        serial_outbound: u8,
 }
 
 fn echo_ram_sub(addr: usize) -> usize {
@@ -171,8 +177,10 @@ impl MMU {
             boot_rom : vec![0; 0x0100],
             rom_data : vec![],
             div_internal : 0,
+            tima_reload_delay: 0,
 
             cgb_mode: false,
+            force_dmg: false,
             vram_bank: 0,
             vram_bank_1: vec![0; 0x2000],
             wram_bank: 1,
@@ -190,6 +198,8 @@ impl MMU {
 
             vram_banned : false,
             oam_banned : false,
+            ppu_mode: 0,
+            ppu_mode_cycles: 0,
             joypad_state : 0xCF,
             joypad_buttons: 0x0F,
             joypad_dpad: 0x0F,
@@ -245,6 +255,8 @@ impl MMU {
             pcm12 : 0,
             pcm34 : 0,
             serial_output : Vec::new(),
+            serial_cycles_remaining: 0,
+            serial_outbound: 0,
         }
     }
 
@@ -263,6 +275,10 @@ impl MMU {
 
     pub fn cgb_mode(&self) -> bool {
         self.cgb_mode
+    }
+
+    pub fn set_force_dmg(&mut self, force_dmg: bool) {
+        self.force_dmg = force_dmg;
     }
 
     pub fn double_speed(&self) -> bool {
@@ -900,12 +916,12 @@ impl MMU {
             let transfer_requested = (data & 0x80) != 0;
             let internal_clock = (data & 0x01) != 0;
             if transfer_requested && internal_clock {
-                let outbound = self.memory[0xFF01];
-                self.serial_output.push(outbound);
-                self.memory[0xFF01] = 0xFF;
-                self.memory[0xFF02] = data & !0x80;
-                let interrupt_flags = self.get_if() | 0b0000_1000;
-                self.set_if(interrupt_flags);
+                self.serial_outbound = self.memory[0xFF01];
+                self.serial_cycles_remaining = if self.cgb_mode && data & 0x02 != 0 {
+                    128
+                } else {
+                    4096
+                };
             }
             return;
         }
@@ -1011,6 +1027,9 @@ impl MMU {
 
 
         if addr == 0xFF05 {
+            // A TIMA write during the overflow's pending machine cycle
+            // cancels the scheduled reload and interrupt request.
+            self.tima_reload_delay = 0;
         }
 
         // catch-all for writes to ROM (both valid and invalid)
@@ -1083,15 +1102,35 @@ impl MMU {
         // overflow
         let tima_val = self.memory[0xFF05];
         if  tima_val == 0xFF {
-            //println!("SETTING TIMEROO");
-            self.memory[0xFF05] = self.memory[0xFF06];
-            // request interrupt, turn on timer bit
-            let if_reg = self.get_if();
-            let mod_if_reg = if_reg | 0b00000100;
-            self.set_if(mod_if_reg);
+            self.memory[0xFF05] = 0;
+            self.tima_reload_delay = 4;
         }
         else {
             self.memory[0xFF05] = tima_val + 1;
+        }
+    }
+
+    pub fn tick_tima_reload(&mut self) {
+        if self.tima_reload_delay == 0 {
+            return;
+        }
+        self.tima_reload_delay -= 1;
+        if self.tima_reload_delay == 0 {
+            self.memory[0xFF05] = self.memory[0xFF06];
+            self.memory[0xFF0F] |= 0x04;
+        }
+    }
+
+    pub fn tick_serial(&mut self) {
+        if self.serial_cycles_remaining == 0 {
+            return;
+        }
+        self.serial_cycles_remaining -= 1;
+        if self.serial_cycles_remaining == 0 {
+            self.serial_output.push(self.serial_outbound);
+            self.memory[0xFF01] = 0xFF;
+            self.memory[0xFF02] &= !0x80;
+            self.memory[0xFF0F] |= 0x08;
         }
     }
 
@@ -1122,6 +1161,117 @@ impl MMU {
 
     pub fn toggle_oam_ban(&mut self, val : bool) {
         self.oam_banned = val;
+    }
+
+    pub fn set_ppu_state(&mut self, mode: u8, mode_cycles: u16) {
+        self.ppu_mode = mode;
+        self.ppu_mode_cycles = mode_cycles;
+    }
+
+    pub fn trigger_oam_idu_corruption(&mut self, address: u16) {
+        self.trigger_oam_idu_corruption_at(address, 0);
+    }
+
+    pub fn trigger_oam_idu_corruption_at(&mut self, address: u16, extra_cycles: u16) {
+        if !self.oam_corruption_active(address) {
+            return;
+        }
+
+        let row = usize::from(((self.ppu_mode_cycles + extra_cycles) / 4).min(19));
+        self.apply_oam_row_corruption(row, false);
+    }
+
+    pub fn trigger_oam_read_corruption(&mut self, address: u16) {
+        self.trigger_oam_read_corruption_at(address, 0);
+    }
+
+    pub fn trigger_oam_read_corruption_at(&mut self, address: u16, extra_cycles: u16) {
+        if !self.oam_corruption_active(address) {
+            return;
+        }
+        let row = usize::from(((self.ppu_mode_cycles + extra_cycles) / 4).min(19));
+        self.apply_oam_row_corruption(row, true);
+    }
+
+    pub fn trigger_oam_read_idu_corruption(&mut self, address: u16) {
+        self.trigger_oam_read_idu_corruption_at(address, 0);
+    }
+
+    pub fn trigger_oam_read_idu_corruption_at(&mut self, address: u16, extra_cycles: u16) {
+        if !self.oam_corruption_active(address) {
+            return;
+        }
+        let row = usize::from(((self.ppu_mode_cycles + extra_cycles) / 4).min(19));
+        if (4..19).contains(&row) {
+            let current = 0xFE00 + row * 8;
+            let previous = current - 8;
+            let two_before = current - 16;
+            let a = u16::from_le_bytes([
+                self.memory[two_before],
+                self.memory[two_before + 1],
+            ]);
+            let b = u16::from_le_bytes([self.memory[previous], self.memory[previous + 1]]);
+            let c = u16::from_le_bytes([self.memory[current], self.memory[current + 1]]);
+            let d = u16::from_le_bytes([
+                self.memory[previous + 4],
+                self.memory[previous + 5],
+            ]);
+            let first = (b & (a | c | d)) | (a & c & d);
+            self.memory[previous..previous + 2].copy_from_slice(&first.to_le_bytes());
+            let mut copied_row = [0; 8];
+            copied_row.copy_from_slice(&self.memory[previous..previous + 8]);
+            self.memory[current..current + 8].copy_from_slice(&copied_row);
+            self.memory[two_before..two_before + 8].copy_from_slice(&copied_row);
+        }
+        self.apply_oam_row_corruption(row, true);
+    }
+
+    fn oam_corruption_active(&self, address: u16) -> bool {
+        !self.cgb_mode
+            && self.memory[0xFF40] & 0x80 != 0
+            && self.ppu_mode == 2
+            && (0xFE00..=0xFEFF).contains(&address)
+    }
+
+    fn apply_oam_row_corruption(&mut self, row: usize, read: bool) {
+        if row == 0 {
+            return;
+        }
+        let current = 0xFE00 + row * 8;
+        let previous = current - 8;
+        let a = u16::from_le_bytes([self.memory[current], self.memory[current + 1]]);
+        let b = u16::from_le_bytes([self.memory[previous], self.memory[previous + 1]]);
+        let c = u16::from_le_bytes([self.memory[previous + 4], self.memory[previous + 5]]);
+        let first = if read {
+            b | (a & c)
+        } else {
+            ((a ^ c) & (b ^ c)) ^ c
+        };
+        self.memory[current..current + 2].copy_from_slice(&first.to_le_bytes());
+        for offset in [2, 4, 6] {
+            self.memory[current + offset] = self.memory[previous + offset];
+            self.memory[current + offset + 1] = self.memory[previous + offset + 1];
+        }
+    }
+
+    pub fn trigger_oam_write_corruption(&mut self, address: u16) {
+        self.trigger_oam_write_corruption_at(address, 0);
+    }
+
+    pub fn trigger_oam_write_corruption_at(&mut self, address: u16, extra_cycles: u16) {
+        if self.cgb_mode
+            || self.memory[0xFF40] & 0x80 == 0
+            || self.ppu_mode != 2
+            || !(0xFE00..=0xFEFF).contains(&address)
+        {
+            return;
+        }
+
+        let row = usize::from(((self.ppu_mode_cycles + extra_cycles) / 4).min(19));
+        if row == 0 {
+            return;
+        }
+        self.apply_oam_row_corruption(row, false);
     }
 
     pub fn get_byte(&self, mut addr: usize) -> u8 {
@@ -1294,7 +1444,7 @@ impl MMU {
     pub fn load_rom(&mut self, rom_data : &Vec<u8>) {
         self.rom_data = rom_data.to_vec();
 
-        self.cgb_mode = matches!(rom_data[0x0143], 0x80 | 0xC0);
+        self.cgb_mode = !self.force_dmg && matches!(rom_data[0x0143], 0x80 | 0xC0);
         self.vram_bank = 0;
         self.wram_bank = 1;
         self.double_speed = false;

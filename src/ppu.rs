@@ -53,6 +53,8 @@ pub struct PPU {
     sprites : [Sprite; 40],
     window_line_counter : u8,
     lcd_enabled: bool,
+    lcd_startup_line: bool,
+    startup_ly_advanced: bool,
 }
 
 impl PPU {
@@ -80,6 +82,8 @@ impl PPU {
             sprites : [Sprite::default(); 40],
             window_line_counter : 0,
             lcd_enabled: false,
+            lcd_startup_line: false,
+            startup_ly_advanced: false,
         }
     }
     
@@ -369,6 +373,7 @@ impl PPU {
         // clear old mode out
         old_stat &= 0b11111100;
         mmu_ref.set_byte(0xFF41, old_stat | mode);
+        mmu_ref.set_ppu_state(mode, self.accumulated_cycles);
 
         // trigger STAT interrupt if appropriate
         match mode {
@@ -427,6 +432,8 @@ impl PPU {
             self.mode = HBlank;
             self.window_line_counter = 0;
             self.lcd_enabled = false;
+            self.lcd_startup_line = false;
+            self.startup_ly_advanced = false;
             mmu_ref.set_raw_byte(0xFF44, 0);
             let stat = mmu_ref.get_byte(0xFF41) & 0xFC;
             mmu_ref.set_raw_byte(0xFF41, stat);
@@ -437,11 +444,28 @@ impl PPU {
             self.mode = OAM;
             self.window_line_counter = 0;
             self.lcd_enabled = true;
+            self.lcd_startup_line = !mmu_ref.cgb_mode();
+            self.startup_ly_advanced = false;
             mmu_ref.set_raw_byte(0xFF44, 0);
             self.toggle_stat_mode(2, mmu_ref);
         }
 
         self.accumulated_cycles = self.accumulated_cycles.wrapping_add(t_cycles as u16);
+        let hardware_mode = match self.mode {
+            HBlank => 0,
+            VBlank => 1,
+            OAM => 2,
+            Transfer => 3,
+        };
+        mmu_ref.set_ppu_state(hardware_mode, self.accumulated_cycles);
+
+        if self.lcd_startup_line
+            && !self.startup_ly_advanced
+            && self.accumulated_cycles >= 452
+        {
+            self.inc_ly(mmu_ref);
+            self.startup_ly_advanced = true;
+        }
 
         let ly = self.get_ly(mmu_ref);
         //println!("ACCUMULATED CYCLES: {}, ly: {}, mode: {:?}", self.accumulated_cycles, ly, self.mode);
@@ -497,7 +521,12 @@ impl PPU {
             }
             HBlank => {
                 if self.accumulated_cycles >= 456 {
-                    self.inc_ly(mmu_ref);
+                    if self.startup_ly_advanced {
+                        self.lcd_startup_line = false;
+                        self.startup_ly_advanced = false;
+                    } else {
+                        self.inc_ly(mmu_ref);
+                    }
                     //self.check_ly_eq_lyc(mmu_ref);
                     // TODO we should probably subtract instead of just set to zero. In the other
                     // spot too.

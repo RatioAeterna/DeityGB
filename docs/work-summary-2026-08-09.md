@@ -585,6 +585,121 @@ nix develop --command cargo test --release --test headless \
   blargg_sound_core_roms_pass -- --ignored --exact
 ```
 
+## Blargg CPU/Memory Timing and DMG OAM Checkpoint
+
+This checkpoint broadens DeityGB's verification from instruction results and
+audio behavior into CPU bus ordering, divider-driven events, interrupt entry,
+LCD startup, and the original DMG's OAM corruption defect. It was developed
+against Pan Docs and the bundled Blargg sources and ROM output. No
+implementation from another emulator was consulted.
+
+### Why Correct Instruction Totals Were Not Enough
+
+DeityGB already returned the correct total cycle count for most instructions,
+which was sufficient for `cpu_instrs` and `instr_timing`. The memory-timing ROMs
+observe *when within an instruction* a read or write reaches the bus. Advancing
+all timers after an instruction allowed an access on the final machine cycle to
+see hardware state from the instruction's beginning.
+
+The CPU now records how many T-cycles of the current instruction have already
+advanced. `timed_read` and `timed_write` advance timers to the relevant bus
+phase before touching the MMU; the epilogue advances only the remainder.
+Absolute and high-memory loads use this path, as do `(HL)` operations. For
+CB-prefixed `(HL)` opcodes, BIT performs its read at the tested boundary, while
+rotates, shifts, RES, and SET perform the later write too. This is a generic bus
+model rather than a list of test-ROM addresses.
+
+Result: both generations of `mem_timing` pass all three groups, while
+`cpu_instrs` remains 11/11 and `instr_timing` remains passing.
+
+### Delayed TIMA Reload and Clocked Serial
+
+TIMA overflow is now represented as a state transition. Overflow first changes
+TIMA to `00`; four T-cycles later TMA is copied into TIMA and IF bit 2 is
+requested. Writing TIMA during that pending interval cancels the reload. A unit
+test records these boundaries so timer work cannot silently restore immediate
+reload behavior.
+
+Internal-clock serial transfers are likewise no longer instantaneous. A normal
+transfer completes after 4096 T-cycles and CGB fast serial after 128. Completion
+captures the outgoing byte, replaces SB with `FF`, clears SC bit 7, and requests
+the serial interrupt. This preserves Blargg's reporting protocol while making
+serial interrupt timing meaningful.
+
+### Interrupt Entry and CGB Double Speed
+
+Interrupt service remains a five-machine-cycle, 20 T-cycle operation. The PC
+high and low bytes now reach the stack on their respective entry machine cycles,
+with the remaining service time advanced afterward. The implementation now
+models the documented sequence instead of only returning the correct total.
+
+Blargg's `interrupt_time` also verifies CGB speed without trusting KEY1: it
+counts CPU instructions while an APU length counter advances at the base
+hardware rate. Its final output identifies normal speed as `00`, double speed
+as `01`, measures `0D` in both modes, and reports `Passed`. This jointly checks
+STOP/KEY1 switching, peripheral scaling, DIV-APU timing, and interrupt latency.
+
+### DMG OAM Corruption as a CPU/PPU Interaction
+
+During mode 2 on original DMG hardware, 16-bit increment/decrement and stack
+bus activity can corrupt the OAM row currently scanned by the PPU. CGB hardware
+does not have this defect. The PPU now publishes its mode and cycle position to
+the MMU. Corruption is applied only with the LCD enabled, in mode 2, on DMG,
+for a 16-bit address in `FE00- FEFF`, and after the first row.
+
+The CPU reports IDU activity from INC/DEC BC, DE, HL, and SP; auto-changing HL
+loads; and stack operations. POP combines its first OAM read with IDU activity
+and places its second read one machine cycle later. PUSH models its initial IDU
+event and two writes on successive machine-cycle offsets. The MMU implements
+the documented write/IDU, read, and combined read-plus-IDU row formulas.
+
+The aggregate OAM ROM has a dual-mode header, so `--dmg` explicitly selects the
+hardware on which the defect exists. The override is applied before ROM loading
+and does not change normal CGB selection for Pokemon Silver. With forced DMG,
+all eight OAM groups pass, including the instruction-effect checksum.
+
+### First LCD Line Timing
+
+The OAM suite exposed a first-line LCD synchronization edge. A broad cycle
+offset fixed that single observation but displaced ordinary mode-2 timing, so
+it was rejected. The implemented behavior is narrow: after LCD enable on DMG,
+LY advances at dot 452 of the startup line while the transition remains at dot
+456. HBlank then avoids incrementing LY twice. LCD synchronization and
+steady-state OAM timing therefore pass together without shifting CGB behavior.
+
+### HALT Bug: Improved but Explicitly Open
+
+HALT with IME clear and an already-pending enabled interrupt suppresses the next
+opcode-fetch PC increment. DeityGB now carries that condition beyond HALT and
+reuses the following opcode byte as the instruction's first operand. A focused
+`LD A,d8` test verifies that lifecycle. An interrupt waking a genuinely halted
+CPU with IME enabled is still serviced before the next opcode, preserving the
+Kirby startup fix.
+
+The complete `halt_bug.gb` matrix still fails its checksum. All nine cases run
+and print coherent IE/IF/DE observations, but some pending-interrupt combinations
+still disagree with the expected fetch sequence. This is the sole known Blargg
+holdout and should resume from the captured C074-C08E routine; it is not being
+misrepresented as completed in this checkpoint.
+
+### Verification Matrix
+
+- `cpu_instrs`: 11/11 passed.
+- `instr_timing`: passed.
+- `mem_timing`: 3/3 passed.
+- `mem_timing-2`: 3/3 passed.
+- `interrupt_time`: passed in normal and CGB double speed.
+- `oam_bug`: 8/8 passed with `--dmg`.
+- `dmg_sound`: 12/12 passed.
+- `cgb_sound`: 12/12 passed.
+- `halt_bug`: still failing and retained as follow-up work.
+
+The headless runner now reports CGB mode, KEY1, and double-speed state, accepts
+`--dmg` for hardware-specific ROMs, and accepts `--trace` for targeted CPU
+diagnosis. Full traces are kept outside the repository and filtered by address
+before inspection; the temporary trace used for this investigation is not part
+of version control.
+
 ## DMG and CGB Acid2 PPU Completion
 
 The Acid2 ROMs are compact visual specifications for the line renderer. They do
