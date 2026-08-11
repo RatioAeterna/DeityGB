@@ -1044,3 +1044,36 @@ Run the complete matrix with:
 nix develop --command cargo test --release --test headless \
   blargg_sound_core_roms_pass -- --ignored --exact
 ```
+
+## Optional CGB Boot ROM Plumbing
+
+DeityGB historically loaded `src/dmg_boot.bin` for every cartridge, including
+CGB titles. That file is 256 bytes and is read from disk at runtime through the
+compiled-in repository path; it is not embedded with `include_bytes!`. This is
+fine for DMG startup, but a real CGB boot ROM is 2304 bytes and has a second
+mapped window at `0200-08FF`, so simply pointing the old loader at a CGB dump
+would not have been enough.
+
+The boot path selection now happens after the cartridge has been read, so the
+header byte at `0143` can decide whether the ROM is CGB-capable. DMG cartridges
+continue to use `src/dmg_boot.bin`. CGB cartridges use `src/cgb_boot.bin` when a
+local dump exists, otherwise they fall back to the existing DMG compatibility
+path and the CPU's A=`11` CGB handoff shim.
+
+`src/cgb_boot.bin` is intentionally not added to git. It is a local user-provided
+boot ROM dump, similar in legal shape to cartridge ROMs. The emulator support is
+committed, but the binary dump remains outside the repository history.
+
+The MMU boot ROM buffer now covers `0000-00FF` and the CGB-only `0200-08FF`
+window while `FF50` is still zero. A write of any non-zero value to `FF50`
+permanently unmaps both windows until reset, preserving the existing
+`boot_rom_cannot_be_remapped_without_reset` behavior. `load_boot_rom` now fills
+the boot buffer without taking ownership of cartridge `rom_data`, which keeps
+boot storage and cartridge storage separate.
+
+The macroquad frontend auto-selects the boot ROM after loading the cartridge
+header. The headless runner does the same unless `--boot` supplies an explicit
+path or `--no-boot` disables boot ROM loading for tests. Coverage includes
+`cgb_boot_rom_maps_extended_boot_window`, which verifies that CGB boot bytes are
+visible at `0000`, `0200`, and `08FF` before `FF50`, and that cartridge ROM
+bytes are visible again after unmapping.

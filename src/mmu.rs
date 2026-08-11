@@ -168,7 +168,7 @@ impl MMU {
     pub fn new() -> MMU {
         MMU {
             memory: vec![0; 0x10000],
-            boot_rom: vec![0; 0x0100],
+            boot_rom: vec![0; 0x0900],
             rom_data: vec![],
             div_internal: 0,
             tima_reload_delay: 0,
@@ -1393,7 +1393,9 @@ impl MMU {
             addr = echo_ram_sub(addr);
         }
 
-        if addr < 0x0100 && (self.get_boot() == 0) {
+        if self.get_boot() == 0
+            && (addr < 0x0100 || (self.cgb_mode && (0x0200..=0x08FF).contains(&addr)))
+        {
             return self.boot_rom[addr];
         }
 
@@ -1557,8 +1559,7 @@ impl MMU {
     }
 
     pub fn load_boot_rom(&mut self, rom_data: &Vec<u8>) {
-        self.rom_data = rom_data.to_vec();
-        for i in 0x0000..0x0100 {
+        for i in 0x0000..self.boot_rom.len().min(rom_data.len()) {
             self.boot_rom[i] = rom_data[i];
         }
     }

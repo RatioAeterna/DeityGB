@@ -1,5 +1,5 @@
 use deitygb::headless::{
-    default_boot_rom_path, load_file, write_ppm, GameBoy, TestOutcome, DMG_CPU_FREQUENCY,
+    default_boot_rom_path_for_rom, load_file, write_ppm, GameBoy, TestOutcome, DMG_CPU_FREQUENCY,
     DMG_FRAME_CYCLES,
 };
 use deitygb::mmu::JoypadButton;
@@ -51,7 +51,8 @@ fn main() {
     };
 
     let mut seconds = 20u64;
-    let mut boot_path = Some(default_boot_rom_path());
+    let mut boot_path = None;
+    let mut load_boot = true;
     let mut dump_frame = None;
     let mut input_events = Vec::new();
     let mut apu_enabled = true;
@@ -68,6 +69,7 @@ fn main() {
                 boot_path = Some(PathBuf::from(args.next().expect("--boot requires a path")));
             }
             "--no-boot" => {
+                load_boot = false;
                 boot_path = None;
             }
             "--dump-frame" => {
@@ -106,13 +108,19 @@ fn main() {
     gb.set_apu_enabled(apu_enabled);
     gb.set_force_dmg(force_dmg);
     gb.cpu.set_trace_enabled(trace);
-    if let Some(path) = boot_path {
-        let boot = load_file(&path).expect("failed to read boot ROM");
-        gb.load_boot_rom(&boot);
-    }
     let save_report = gb
         .load_rom_from_path(&rom_path)
         .expect("failed to read ROM");
+    if load_boot && boot_path.is_none() {
+        let rom = load_file(&rom_path).expect("failed to reread ROM for boot ROM selection");
+        boot_path = Some(default_boot_rom_path_for_rom(&rom));
+    }
+    if load_boot {
+        if let Some(path) = boot_path {
+            let boot = load_file(&path).expect("failed to read boot ROM");
+            gb.load_boot_rom(&boot);
+        }
+    }
     if save_report.enabled {
         if let Some(path) = &save_report.save_path {
             println!("save-path: {}", path.display());

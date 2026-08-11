@@ -221,6 +221,23 @@ pub fn default_boot_rom_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/dmg_boot.bin")
 }
 
+pub fn default_cgb_boot_rom_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/cgb_boot.bin")
+}
+
+pub fn is_cgb_rom(rom: &[u8]) -> bool {
+    rom.get(0x0143).is_some_and(|mode| matches!(*mode, 0x80 | 0xC0))
+}
+
+pub fn default_boot_rom_path_for_rom(rom: &[u8]) -> PathBuf {
+    let cgb_boot = default_cgb_boot_rom_path();
+    if is_cgb_rom(rom) && cgb_boot.exists() {
+        cgb_boot
+    } else {
+        default_boot_rom_path()
+    }
+}
+
 pub fn packed_framebuffer_to_rgba(screen: &[u8; 5760]) -> Vec<u8> {
     let mut rgba = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT * 4];
     for (i, four_pixels) in screen.iter().copied().enumerate() {

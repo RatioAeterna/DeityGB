@@ -218,6 +218,26 @@ fn boot_rom_cannot_be_remapped_without_reset() {
 }
 
 #[test]
+fn cgb_boot_rom_maps_extended_boot_window() {
+    let mut mmu = MMU::new();
+    let mut rom = cgb_test_rom();
+    rom[0x0200] = 0x44;
+    mmu.load_rom(&rom);
+    let mut boot = vec![0; 0x0900];
+    boot[0x0000] = 0x11;
+    boot[0x0200] = 0x22;
+    boot[0x08FF] = 0x33;
+    mmu.load_boot_rom(&boot);
+
+    assert_eq!(mmu.get_byte(0x0000), 0x11);
+    assert_eq!(mmu.get_byte(0x0200), 0x22);
+    assert_eq!(mmu.get_byte(0x08FF), 0x33);
+
+    mmu.set_byte(0xFF50, 1);
+    assert_eq!(mmu.get_byte(0x0200), 0x44);
+}
+
+#[test]
 fn offscreen_sprite_coordinates_do_not_overflow() {
     let mut mmu = MMU::new();
     let mut ppu = PPU::new();

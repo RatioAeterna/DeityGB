@@ -2,7 +2,9 @@ use std::env;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use deitygb::cartridge_save::CartridgeSave;
-use deitygb::headless::{default_boot_rom_path, load_file};
+use deitygb::headless::{
+    default_boot_rom_path, default_boot_rom_path_for_rom, is_cgb_rom, load_file,
+};
 use deitygb::mmu::JoypadButton;
 use deitygb::{apu, cpu, mmu, ppu};
 use macroquad::prelude::*;
@@ -183,10 +185,6 @@ async fn main() {
     let mut byte_buffer = Vec::new();
     cartridge.read_to_end(&mut byte_buffer);
     */
-    let boot_byte_buffer = load_file(&default_boot_rom_path()).expect("Couldn't read boot ROM");
-    mmu.load_boot_rom(&boot_byte_buffer);
-    mmu.map_cartridge_nintendo_logo();
-
     /*
     let hex_values: Vec<String> = byte_buffer.iter()
                                     .map(|byte| format!("{:02x}", byte))
@@ -198,6 +196,14 @@ async fn main() {
     let rom_path = std::path::Path::new(&args[1]);
     let cartridge_byte_buffer = load_file(rom_path).expect("Couldn't read cartridge ROM");
     mmu.load_rom(&cartridge_byte_buffer);
+    let boot_path = default_boot_rom_path_for_rom(&cartridge_byte_buffer);
+    if is_cgb_rom(&cartridge_byte_buffer) && boot_path == default_boot_rom_path() {
+        eprintln!(
+            "boot: src/cgb_boot.bin not found; using DMG boot ROM compatibility path"
+        );
+    }
+    let boot_byte_buffer = load_file(&boot_path).expect("Couldn't read boot ROM");
+    mmu.load_boot_rom(&boot_byte_buffer);
     let mut cartridge_save = CartridgeSave::for_rom_path(rom_path);
     let save_report = cartridge_save.load_after_rom(&mut mmu);
     if save_report.enabled {
