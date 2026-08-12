@@ -118,7 +118,7 @@ struct Sweep {
 
 #[derive(Clone)]
 pub struct APU {
-    pub audio_sender: mpsc::Sender<(f32, f32)>,
+    audio_sink: AudioSink,
     pulse1: PulseChannel,
     pulse2: PulseChannel,
     wave: WaveChannel,
@@ -132,14 +132,41 @@ pub struct APU {
     right_capacitor: f32,
 }
 
+#[derive(Clone)]
+enum AudioSink {
+    Unbounded(mpsc::Sender<(f32, f32)>),
+    Bounded(mpsc::SyncSender<(f32, f32)>),
+}
+
+impl AudioSink {
+    fn send(&self, sample: (f32, f32)) {
+        match self {
+            AudioSink::Unbounded(sender) => {
+                let _ = sender.send(sample);
+            }
+            AudioSink::Bounded(sender) => {
+                let _ = sender.try_send(sample);
+            }
+        }
+    }
+}
+
 impl APU {
     pub fn new(sender: mpsc::Sender<(f32, f32)>) -> Self {
         Self::with_sample_rate(sender, 48_000)
     }
 
     pub fn with_sample_rate(sender: mpsc::Sender<(f32, f32)>, sample_rate: u32) -> Self {
+        Self::with_audio_sink(AudioSink::Unbounded(sender), sample_rate)
+    }
+
+    pub fn with_bounded_sample_rate(sender: mpsc::SyncSender<(f32, f32)>, sample_rate: u32) -> Self {
+        Self::with_audio_sink(AudioSink::Bounded(sender), sample_rate)
+    }
+
+    fn with_audio_sink(audio_sink: AudioSink, sample_rate: u32) -> Self {
         Self {
-            audio_sender: sender,
+            audio_sink,
             pulse1: PulseChannel::default(),
             pulse2: PulseChannel::default(),
             wave: WaveChannel::default(),
@@ -625,7 +652,7 @@ impl APU {
         while self.sample_clock >= CPU_HZ {
             self.sample_clock -= CPU_HZ;
             let sample = self.generate_sample(mmu);
-            let _ = self.audio_sender.send(sample);
+            self.audio_sink.send(sample);
         }
     }
 }

@@ -16,6 +16,8 @@ const CYCLES_PER_FRAME: u32 = 70_224;
 const STARTUP_SPLASH_SECONDS: f64 = 1.8;
 const FIERCE_DEITY_PNG: &[u8] = include_bytes!("../assets/fierce_deity.png");
 const SAVE_FLUSH_DEBOUNCE: Duration = Duration::from_secs(1);
+const FAST_FORWARD_FRAMES_PER_HOST_FRAME: u32 = 2;
+const AUDIO_QUEUE_CAPACITY: usize = 2_048;
 
 const GB_SCREEN_DIM: u32 = 23040; // 160x144
 const SCREEN_UPSCALE_FACTOR: f32 = 5.0; // gameboy screen is super tiny, so we upscale it
@@ -95,12 +97,20 @@ fn host_frame_due(vblank_frame_ready: bool, accumulated_cycles: u32) -> bool {
     vblank_frame_ready || accumulated_cycles >= CYCLES_PER_FRAME
 }
 
+fn host_frames_per_present(fast_forward: bool) -> u32 {
+    if fast_forward {
+        FAST_FORWARD_FRAMES_PER_HOST_FRAME
+    } else {
+        1
+    }
+}
+
 pub struct SimpleAudio {
     _stream: cpal::Stream,
 }
 
 impl SimpleAudio {
-    pub fn new() -> (Self, mpsc::Sender<(f32, f32)>, u32) {
+    pub fn new() -> (Self, mpsc::SyncSender<(f32, f32)>, u32) {
         let host = cpal::default_host();
         let device = host.default_output_device().unwrap();
         let config = device.default_output_config().unwrap();
@@ -108,7 +118,8 @@ impl SimpleAudio {
         let channels = usize::from(config.channels());
 
         // Create a channel for sending samples from APU to audio thread
-        let (sample_sender, sample_receiver) = mpsc::channel::<(f32, f32)>();
+        let (sample_sender, sample_receiver) =
+            mpsc::sync_channel::<(f32, f32)>(AUDIO_QUEUE_CAPACITY);
 
         let stream = device
             .build_output_stream(
@@ -166,14 +177,14 @@ async fn main() {
         let (audio, sender, sample_rate) = SimpleAudio::new();
         (Some(audio), sender, sample_rate, None)
     } else {
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = mpsc::sync_channel(AUDIO_QUEUE_CAPACITY);
         (None, sender, 48_000, Some(receiver))
     };
 
     let mut mmu = mmu::MMU::new();
     let mut cpu = cpu::CPU::new();
     let mut ppu = ppu::PPU::new();
-    let mut apu = apu::APU::with_sample_rate(sender, sample_rate);
+    let mut apu = apu::APU::with_bounded_sample_rate(sender, sample_rate);
 
     /*
     let path = Path::new(&args[1]);
@@ -228,8 +239,9 @@ async fn main() {
     screen_texture.set_filter(FilterMode::Nearest);
 
     let mut last_fps_check = get_time();
-    let mut frames = 0;
+    let mut emulated_frames = 0;
     let mut fps_display = String::new();
+    let mut emulated_frames_since_present = 0u32;
 
     let mut rendered_yet: bool = false;
     let mut last_lcd_enabled = mmu.get_byte(0xFF40) & 0x80 != 0;
@@ -297,6 +309,15 @@ async fn main() {
                 rendered_yet = true;
             }
             accumulated_cycles = 0;
+            emulated_frames_since_present += 1;
+            let fast_forward = is_key_down(KeyCode::Tab);
+            emulated_frames += 1;
+            let should_present =
+                emulated_frames_since_present >= host_frames_per_present(fast_forward);
+            if !should_present {
+                continue;
+            }
+            emulated_frames_since_present = 0;
             screen_texture.update(&screen_image);
             draw_texture_ex(
                 &screen_texture,
@@ -310,15 +331,17 @@ async fn main() {
             );
             //handle_input(&mut mmu);
 
-            frames += 1;
-
             let now = get_time();
             let elapsed = now - last_fps_check;
 
             if elapsed >= 1.0 {
-                let fps = (frames as f64 / elapsed) as u32;
-                fps_display = format!("FPS: {}", fps);
-                frames = 0;
+                let fps = (emulated_frames as f64 / elapsed) as u32;
+                fps_display = if fast_forward {
+                    format!("FPS: {} FAST 2x", fps)
+                } else {
+                    format!("FPS: {}", fps)
+                };
+                emulated_frames = 0;
                 last_fps_check = now;
             }
 
@@ -379,5 +402,11 @@ mod tests {
         assert!(!host_frame_due(false, CYCLES_PER_FRAME - 1));
         assert!(host_frame_due(false, CYCLES_PER_FRAME));
         assert!(host_frame_due(true, 0));
+    }
+
+    #[test]
+    fn tab_fast_forward_presents_every_second_emulated_frame() {
+        assert_eq!(host_frames_per_present(false), 1);
+        assert_eq!(host_frames_per_present(true), 2);
     }
 }

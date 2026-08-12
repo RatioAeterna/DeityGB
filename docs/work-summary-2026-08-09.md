@@ -1246,3 +1246,48 @@ state changes at the same sub-instruction points the CPU observes. A naive
 per-cycle PPU loop was tried and rejected because it slowed the suite
 substantially without increasing the pass count; the next version needs to
 advance only to scheduled PPU edges and timed memory accesses.
+
+## Frontend TAB Fast-Forward
+
+The macroquad frontend now treats a held TAB key as a deliberate user
+fast-forward control. This is not the Game Boy Color hardware double-speed mode
+driven by `KEY1` and `STOP`; it is a host-side playback affordance. The emulator
+still advances the CPU, PPU, APU, timers, RTC, DMA, cartridge state, and save
+debounce through the same cycle paths as normal play. The frontend simply runs
+two emulated frames before yielding to macroquad's next presented host frame.
+
+The first attempt only skipped every other presentation. That made the visual
+path advance faster in the Codex worktree build, but it was easy to miss because
+the original checkout's release binary had not been rebuilt and the overlay was
+still counting presented frames rather than emulated frames. The final version
+keeps a separate emulated-frame counter, presents every second emulated frame
+while TAB is held, and shows `FAST 2x` in the overlay so the active path is
+visible while testing.
+
+Audio needed a separate fix. The APU correctly produced samples for every
+emulated cycle, so TAB fast-forward created roughly twice as many samples per
+wall-clock second. The old frontend audio path used an unbounded `mpsc` queue,
+which meant the host audio callback kept playing old queued samples at normal
+device speed. The user-visible result was gameplay moving at 2x while audio
+lagged farther and farther behind.
+
+The live frontend now uses a small bounded `sync_channel` and constructs the APU
+with a bounded audio sink. That sink uses `try_send`, so samples that cannot be
+accepted immediately are dropped instead of becoming stale buffered audio.
+Headless tests and existing APU callers keep the unbounded sender constructor,
+preserving their previous behavior. This policy favors synchronization during
+fast-forward over audio fidelity: TAB playback may sound choppier or skip
+samples, but it should stay temporally aligned with the accelerated game rather
+than trailing seconds behind.
+
+The release binary was rebuilt in the normal checkout with:
+
+```sh
+nix develop --command cargo build --release
+```
+
+Focused regression coverage was run with:
+
+```sh
+nix develop --command cargo test --release tab_fast_forward_presents_every_second_emulated_frame
+```
