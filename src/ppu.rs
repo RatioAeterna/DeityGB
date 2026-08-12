@@ -472,7 +472,6 @@ impl PPU {
             self.lcd_enabled = false;
             self.lcd_startup_line = false;
             self.startup_ly_advanced = false;
-            self.stat_irq_line = false;
             mmu_ref.set_raw_byte(0xFF44, 0);
             let stat = mmu_ref.get_byte(0xFF41) & 0xFC;
             mmu_ref.set_raw_byte(0xFF41, stat);
@@ -482,13 +481,14 @@ impl PPU {
         }
         if !self.lcd_enabled {
             self.accumulated_cycles = 0;
-            self.mode = OAM;
+            self.mode = HBlank;
             self.window_line_counter = 0;
             self.lcd_enabled = true;
             self.lcd_startup_line = !mmu_ref.cgb_mode();
             self.startup_ly_advanced = false;
             mmu_ref.set_raw_byte(0xFF44, 0);
-            self.toggle_stat_mode(2, mmu_ref);
+            self.toggle_stat_mode(0, mmu_ref);
+            self.check_ly_eq_lyc(mmu_ref);
             self.update_stat_irq_line(mmu_ref);
         }
 

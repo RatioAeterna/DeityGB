@@ -1180,13 +1180,15 @@ impl MMU {
         if addr == 0xFF45 {
             let old_stat = self.memory[0xFF41];
             self.memory[addr] = data;
-            if self.memory[0xFF44] == data {
-                self.memory[0xFF41] |= 0x04;
-            } else {
-                self.memory[0xFF41] &= !0x04;
-            }
-            if old_stat & 0x04 == 0 && self.memory[0xFF41] & 0x44 == 0x44 {
-                self.memory[0xFF0F] |= 0x02;
+            if self.memory[0xFF40] & 0x80 != 0 {
+                if self.memory[0xFF44] == data {
+                    self.memory[0xFF41] |= 0x04;
+                } else {
+                    self.memory[0xFF41] &= !0x04;
+                }
+                if old_stat & 0x04 == 0 && self.memory[0xFF41] & 0x44 == 0x44 {
+                    self.memory[0xFF0F] |= 0x02;
+                }
             }
             return;
         }

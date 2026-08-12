@@ -1226,7 +1226,53 @@ edge. That keeps the transfer byte visible for the DMG-ABC boot-clock alignment
 test's sampling point and updates the focused serial unit test to assert the
 new boundary.
 
-The remaining 9 failures are:
+### Mooneye 67/75 STAT/LYC Follow-Up
+
+The protected baseline is now 67/75. The new pass is
+`ppu/stat_lyc_onoff.gb`, which probes a very narrow LCD-off corner rather than
+ordinary rendering. While the LCD controller is disabled, DeityGB now preserves
+the existing STAT coincidence bit and does not recompute it on `LYC` writes.
+That models the test's assumption that the LY=LYC comparison clock is stopped
+while LCD is off. When LCD is enabled again, the PPU restarts from mode 0 for
+the immediate observable STAT read, recomputes coincidence once, and then lets
+the normal STAT IRQ-line edge detector decide whether IF bit 1 should rise.
+
+The ownership boundary matters here: the MMU still accepts writes to `LYC`, but
+it only updates PPU-owned coincidence/interrupt state while LCD is on. The PPU
+keeps responsibility for LCD enable/disable transitions, STAT mode bits, and
+the latched STAT IRQ line. That split avoids a stale-LYC shortcut in the MMU
+while keeping the visible LCD-off behavior stable for ROMs that read STAT
+immediately around the enable edge.
+
+The important lesson from this pass is that STAT has both stored bits and
+live PPU-derived bits. It is tempting to treat a write to `LYC` as an ordinary
+register write followed by an immediate `LY == LYC` refresh, but Mooneye's ROM
+intentionally disables LCD, writes values that would otherwise toggle
+coincidence, and then checks that the old coincidence state survived until the
+LCD logic was restarted. DeityGB now lets the CPU-visible `LYC` byte change
+while holding the LCD-off comparison output steady. That is why the fix lives in
+both places: `MMU::set_byte` handles the CPU write without pretending to run the
+stopped comparator, and `PPU::cycle` performs the restart-time comparison when
+LCD transitions back on.
+
+The STAT IRQ line is similarly level-like internally but edge-triggered at the
+interrupt flag. The emulator already had an ORed STAT IRQ-line model from the
+66/75 work; this change avoids clearing that internal latch as a side effect of
+LCD disable, because the test cares about whether a later LCD enable produces a
+fresh low-to-high transition. In plain terms: changing visible STAT mode bits is
+not the same thing as pulsing IF. The PPU now updates the visible mode/coincidence
+state first, then asks the edge detector whether the combined STAT source line
+actually rose.
+
+This does not solve the remaining LCD-enable timing ROMs. Those tests observe
+more precise dot-level relationships between LY, mode bits, access windows, and
+interrupt sampling. This change is deliberately narrower: it fixes one documented
+LCD-off `LYC` behavior without installing a broad speculative PPU scheduler that
+could move already-passing tests. The full-tree classifier and known-pass guard
+were both run after the change so the new pass is protected and the previous 66
+passes stayed green.
+
+The remaining 8 failures are:
 
 - `ppu/hblank_ly_scx_timing-GS.gb`
 - `ppu/intr_2_mode0_timing.gb`
@@ -1235,7 +1281,6 @@ The remaining 9 failures are:
 - `ppu/intr_2_oam_ok_timing.gb`
 - `ppu/lcdon_timing-GS.gb`
 - `ppu/lcdon_write_timing-GS.gb`
-- `ppu/stat_lyc_onoff.gb`
 - `ppu/vblank_stat_intr-GS.gb`
 
 The failed PPU ROMs are not generic rendering problems; they probe exact
