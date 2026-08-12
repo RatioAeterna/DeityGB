@@ -915,6 +915,9 @@ fn mooneye_acceptance_known_passes_remain_green() {
         "pop_timing.gb",
         "ppu/intr_1_2_timing-GS.gb",
         "ppu/intr_2_0_timing.gb",
+        "ppu/intr_2_mode0_timing.gb",
+        "ppu/intr_2_mode3_timing.gb",
+        "ppu/intr_2_oam_ok_timing.gb",
         "ppu/stat_irq_blocking.gb",
         "ppu/stat_lyc_onoff.gb",
         "push_timing.gb",
@@ -1016,8 +1019,8 @@ fn mooneye_acceptance_suite_reports_no_timeouts() {
         "Mooneye acceptance timeouts: {:?}",
         timed_out
     );
-    assert_eq!(passed.len(), 67, "passed cases changed: {:?}", passed);
-    assert_eq!(failed.len(), 8, "failed cases changed: {:?}", failed);
+    assert_eq!(passed.len(), 70, "passed cases changed: {:?}", passed);
+    assert_eq!(failed.len(), 5, "failed cases changed: {:?}", failed);
 }
 
 #[test]

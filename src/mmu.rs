@@ -1385,13 +1385,13 @@ impl MMU {
             return;
         }
 
-        if self.vram_banned && (addr >= 0x8000) && (addr <= 0x9FFF) {
+        if self.observable_vram_banned() && (addr >= 0x8000) && (addr <= 0x9FFF) {
             return;
         }
         if self.oam_dma_active && (addr >= 0xFE00) && (addr <= 0xFE9F) {
             return;
         }
-        if self.oam_banned && (addr >= 0xFE00) && (addr <= 0xFE9F) {
+        if self.observable_oam_banned() && (addr >= 0xFE00) && (addr <= 0xFE9F) {
             return;
         }
 
@@ -1520,6 +1520,28 @@ impl MMU {
     pub fn set_ppu_state(&mut self, mode: u8, mode_cycles: u16) {
         self.ppu_mode = mode;
         self.ppu_mode_cycles = mode_cycles;
+    }
+
+    fn observable_ppu_mode(&self) -> u8 {
+        if self.memory[0xFF40] & 0x80 == 0 {
+            return 0;
+        }
+        match self.ppu_mode {
+            // Mooneye's CPU-observed STAT/access timing sees the mode 2->3
+            // and mode 3->0 bus boundaries one machine cycle before DeityGB's
+            // coarse internal transition/IRQ point.
+            2 if self.ppu_mode_cycles >= 76 => 3,
+            3 if self.ppu_mode_cycles >= 248 => 0,
+            mode => mode,
+        }
+    }
+
+    fn observable_vram_banned(&self) -> bool {
+        self.observable_ppu_mode() == 3
+    }
+
+    fn observable_oam_banned(&self) -> bool {
+        matches!(self.observable_ppu_mode(), 2 | 3)
     }
 
     pub fn trigger_oam_idu_corruption(&mut self, address: u16) {
@@ -1746,11 +1768,11 @@ impl MMU {
         }
 
         if addr == 0xFF41 {
-            return self.memory[addr] | 0x80;
+            return (self.memory[addr] & !0x03) | self.observable_ppu_mode() | 0x80;
         }
 
         if (0x8000..=0x9FFF).contains(&addr) {
-            if self.vram_banned {
+            if self.observable_vram_banned() {
                 return 0xFF;
             }
             let bank = if self.cgb_mode { self.vram_bank } else { 0 };
@@ -1769,14 +1791,14 @@ impl MMU {
             return self.memory[addr];
         }
 
-        if self.vram_banned && (addr >= 0x8000) && (addr <= 0x9FFF) {
+        if self.observable_vram_banned() && (addr >= 0x8000) && (addr <= 0x9FFF) {
             return 0xFF;
         }
         if self.oam_dma_active && (addr >= 0xFE00) && (addr <= 0xFE9F) {
             return 0xFF;
         }
 
-        if self.oam_banned && (addr >= 0xFE00) && (addr <= 0xFE9F) {
+        if self.observable_oam_banned() && (addr >= 0xFE00) && (addr <= 0xFE9F) {
             return 0xFF;
         }
 

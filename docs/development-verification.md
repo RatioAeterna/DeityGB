@@ -170,13 +170,13 @@ nix develop --command cargo test --release --test headless \
 ```
 
 The current baseline over `src/roms/mts-20240926-1737-443f6e1/acceptance` is
-67 passed, 8 failed, 0 timed out with a 10-second budget and APU disabled.
+70 passed, 5 failed, 0 timed out with a 10-second budget and APU disabled.
 Passing coverage includes DAA, IF/IE, DI/EI sequencing, HALT timing, interrupt
 dispatch edge cases, JP/CALL/RET/RST/PUSH/POP timing, ADD SP/e and
 LD HL/SP+e timing, DMG-family unused HWIO bus masks, model-specific
 DMG0/DMG-ABC/MGB/SGB/SGB2 post-boot register, DIV, and HWIO profiles, OAM DMA
 start/restart/source/read behavior, DIV/TAC falling edges, TIMA reload/write
-windows, STAT IRQ blocking, LCD-off LYC coincidence behavior, DMG-ABC serial
+windows, STAT IRQ blocking, CPU-visible PPU mode/access boundary timing, LCD-off LYC coincidence behavior, DMG-ABC serial
 boot-clock alignment, and all basic TIMA rates. Known failures now cluster
 around PPU STAT/LY/LCD enable timing.
 

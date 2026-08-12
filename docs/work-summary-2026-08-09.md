@@ -1272,13 +1272,37 @@ could move already-passing tests. The full-tree classifier and known-pass guard
 were both run after the change so the new pass is protected and the previous 66
 passes stayed green.
 
-The remaining 8 failures are:
+### Mooneye 70/75 CPU-Visible PPU Boundary Follow-Up
+
+The protected baseline is now 70/75. Three more PPU timing ROMs pass:
+`ppu/intr_2_mode0_timing.gb`, `ppu/intr_2_mode3_timing.gb`, and
+`ppu/intr_2_oam_ok_timing.gb`. These tests all start from a mode 2 STAT
+interrupt and then ask what the CPU can observe through STAT reads or OAM reads
+near the mode 2->3 and mode 3->0 boundaries.
+
+The useful distinction is internal PPU phase versus CPU-visible bus behavior.
+DeityGB still keeps the internal mode transitions at the old coarse points so
+STAT interrupt timing such as `ppu/intr_2_0_timing.gb` remains stable. The MMU
+now has a small `observable_ppu_mode` helper for CPU reads and writes that uses
+the tracked PPU phase counters to expose the access-window boundary one machine
+cycle earlier: mode 2 reads as mode 3 at dot 76, and mode 3 reads as mode 0 at
+dot 248. OAM and VRAM access checks use that same observable mode, so the CPU can
+see OAM become readable at the point Mooneye expects without moving the internal
+STAT mode-0 interrupt edge.
+
+This split is deliberately one-way. PPU-owned interrupt logic still uses the raw
+STAT register bits, not the CPU-observable mode override, otherwise enabling the
+mode-0 STAT source near the early observable HBlank boundary would request IF too
+early and regress `ppu/intr_2_0_timing.gb`. LCD-off handling also forces the
+observable mode to 0 so the earlier `ppu/stat_lyc_onoff.gb` fix keeps its
+hardware-style LCD-disabled STAT reads. In other words: the CPU bus can expose an
+early access boundary, but the PPU's own STAT IRQ source remains tied to the
+internal phase transition until DeityGB grows a finer event scheduler.
+
+The remaining 5 failures are:
 
 - `ppu/hblank_ly_scx_timing-GS.gb`
-- `ppu/intr_2_mode0_timing.gb`
 - `ppu/intr_2_mode0_timing_sprites.gb`
-- `ppu/intr_2_mode3_timing.gb`
-- `ppu/intr_2_oam_ok_timing.gb`
 - `ppu/lcdon_timing-GS.gb`
 - `ppu/lcdon_write_timing-GS.gb`
 - `ppu/vblank_stat_intr-GS.gb`

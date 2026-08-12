@@ -392,7 +392,7 @@ impl PPU {
 
     pub fn toggle_stat(&self, bit : u8, value : bool, mmu_ref : &mut mmu::MMU) {
         let mask = (1 as u8) << bit;
-        let old_stat = mmu_ref.get_byte(0xFF41 as usize);
+        let old_stat = mmu_ref.get_raw_byte(0xFF41 as usize);
         if value {
             mmu_ref.set_raw_byte(0xFF41, old_stat | mask);
         }
@@ -429,7 +429,7 @@ impl PPU {
     }
 
     fn stat_irq_condition(&self, mmu_ref: &mut mmu::MMU) -> bool {
-        let stat = self.get_stat(mmu_ref);
+        let stat = mmu_ref.get_raw_byte(0xFF41) | 0x80;
         let mode = stat & 0x03;
         (stat & 0x40 != 0 && stat & 0x04 != 0)
             || (mode == 0 && stat & 0x08 != 0)
