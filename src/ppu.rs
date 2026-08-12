@@ -55,6 +55,7 @@ pub struct PPU {
     lcd_enabled: bool,
     lcd_startup_line: bool,
     startup_ly_advanced: bool,
+    stat_irq_line: bool,
 }
 
 impl PPU {
@@ -84,9 +85,45 @@ impl PPU {
             lcd_enabled: false,
             lcd_startup_line: false,
             startup_ly_advanced: false,
+            stat_irq_line: false,
         }
     }
-    
+
+    pub fn apply_dmg_family_post_boot_state(
+        &mut self,
+        stat: u8,
+        ly: u8,
+        ppu_mode: Option<u8>,
+        ppu_cycles: Option<u16>,
+        ppu_ly: Option<u8>,
+        mmu_ref: &mut mmu::MMU,
+    ) {
+        self.lcd_enabled = mmu_ref.get_byte(0xFF40) & 0x80 != 0;
+        self.mode = match ppu_mode.unwrap_or(stat & 0x03) & 0x03 {
+            0 => HBlank,
+            1 => VBlank,
+            2 => OAM,
+            _ => Transfer,
+        };
+        self.accumulated_cycles = match self.mode {
+            OAM => 0,
+            Transfer => 80,
+            HBlank => 252,
+            VBlank => 0,
+        };
+        if let Some(cycles) = ppu_cycles {
+            self.accumulated_cycles = cycles;
+        }
+        self.window_line_counter = 0;
+        self.lcd_startup_line = false;
+        self.startup_ly_advanced = false;
+        self.stat_irq_line = false;
+        mmu_ref.set_raw_byte(0xFF44, ppu_ly.unwrap_or(ly));
+        self.toggle_stat_mode(stat & 0x03, mmu_ref);
+        self.check_ly_eq_lyc(mmu_ref);
+        self.update_stat_irq_line(mmu_ref);
+    }
+
     // TODO these should most likely NOT be public
 
     pub fn get_scy(&mut self, mmu_ref : &mut mmu::MMU) -> u8 {
@@ -357,10 +394,10 @@ impl PPU {
         let mask = (1 as u8) << bit;
         let old_stat = mmu_ref.get_byte(0xFF41 as usize);
         if value {
-            mmu_ref.set_byte(0xFF41, old_stat | mask);
+            mmu_ref.set_raw_byte(0xFF41, old_stat | mask);
         }
         else {
-            mmu_ref.set_byte(0xFF41, old_stat & !mask);
+            mmu_ref.set_raw_byte(0xFF41, old_stat & !mask);
             //println!("TOGGLE STAT: {:#010b} !MASK: {:#01b}, MASK: {:#01b}", old_stat, !mask, mask);
         }
     }
@@ -372,57 +409,58 @@ impl PPU {
         let mut old_stat = mmu_ref.get_byte(0xFF41 as usize);
         // clear old mode out
         old_stat &= 0b11111100;
-        mmu_ref.set_byte(0xFF41, old_stat | mode);
+        mmu_ref.set_raw_byte(0xFF41, old_stat | mode);
         mmu_ref.set_ppu_state(mode, self.accumulated_cycles);
-
-        // trigger STAT interrupt if appropriate
         match mode {
-            0 => {
-                if (old_stat & 0b00001000) != 0 {
-                    let mut if_reg = mmu_ref.get_if();
-                    if_reg |= 0b10;
-                    mmu_ref.set_if(if_reg);
-                }
-            },
-            1 => {
-                if (old_stat & 0b00010000) != 0 {
-                    let mut if_reg = mmu_ref.get_if();
-                    if_reg |= 0b10;
-                    mmu_ref.set_if(if_reg);
-                }
-            },
+            0 | 1 => {
+                mmu_ref.toggle_oam_ban(false);
+                mmu_ref.toggle_vram_ban(false);
+            }
             2 => {
-                if (old_stat & 0b00100000) != 0 {
-                    let mut if_reg = mmu_ref.get_if();
-                    if_reg |= 0b10;
-                    mmu_ref.set_if(if_reg);
-                }
-            },
-            _ => ()
+                mmu_ref.toggle_oam_ban(true);
+                mmu_ref.toggle_vram_ban(false);
+            }
+            3 => {
+                mmu_ref.toggle_oam_ban(true);
+                mmu_ref.toggle_vram_ban(true);
+            }
+            _ => {}
         }
+    }
+
+    fn stat_irq_condition(&self, mmu_ref: &mut mmu::MMU) -> bool {
+        let stat = self.get_stat(mmu_ref);
+        let mode = stat & 0x03;
+        (stat & 0x40 != 0 && stat & 0x04 != 0)
+            || (mode == 0 && stat & 0x08 != 0)
+            || (mode == 1 && stat & 0x10 != 0)
+            || (mode == 2 && stat & 0x20 != 0)
+    }
+
+    fn update_stat_irq_line(&mut self, mmu_ref: &mut mmu::MMU) {
+        let new_line = self.stat_irq_condition(mmu_ref);
+        if new_line && !self.stat_irq_line {
+            let mut if_reg = mmu_ref.get_if();
+            if_reg |= 0b10;
+            mmu_ref.set_if(if_reg);
+        }
+        self.stat_irq_line = new_line;
     }
 
     pub fn check_ly_eq_lyc(&mut self, mmu_ref : &mut mmu::MMU) {
         if self.get_ly(mmu_ref) == self.get_lyc(mmu_ref) {
-            let old_stat = self.get_stat(mmu_ref);
             self.toggle_stat(2, true, mmu_ref);
-            let new_stat = self.get_stat(mmu_ref);
-            
-            if (old_stat^new_stat != 0) && ((new_stat & 0b01000000) != 0) {
-                let mut if_reg = mmu_ref.get_if();
-                if_reg |= 0b10;
-                mmu_ref.set_if(if_reg);
-                //println!("LY==LYC! {} {}", self.get_ly(mmu_ref), self.get_lyc(mmu_ref));
-            }
-            else {
-                //println!("OLD NEWS LY LYC! {} {}", self.get_ly(mmu_ref), self.get_lyc(mmu_ref));
-                //println!("OLD STAT: {:#010b} NEW STAT: {:#01b}", old_stat, new_stat);
-            }
+            self.update_stat_irq_line(mmu_ref);
         }
         else {
             self.toggle_stat(2, false, mmu_ref);
+            self.update_stat_irq_line(mmu_ref);
             //println!("LY!=LYC! {} {}, stat{:#010b}", self.get_ly(mmu_ref), self.get_lyc(mmu_ref), self.get_stat(mmu_ref));
         }
+    }
+
+    fn mode3_cycles(&mut self, mmu_ref: &mut mmu::MMU) -> u16 {
+        172 + u16::from(self.get_scx(mmu_ref) & 0x07)
     }
 
     pub fn cycle(&mut self, t_cycles: u8, mmu_ref : &mut mmu::MMU) {
@@ -434,9 +472,12 @@ impl PPU {
             self.lcd_enabled = false;
             self.lcd_startup_line = false;
             self.startup_ly_advanced = false;
+            self.stat_irq_line = false;
             mmu_ref.set_raw_byte(0xFF44, 0);
             let stat = mmu_ref.get_byte(0xFF41) & 0xFC;
             mmu_ref.set_raw_byte(0xFF41, stat);
+            mmu_ref.toggle_oam_ban(false);
+            mmu_ref.toggle_vram_ban(false);
             return;
         }
         if !self.lcd_enabled {
@@ -448,6 +489,7 @@ impl PPU {
             self.startup_ly_advanced = false;
             mmu_ref.set_raw_byte(0xFF44, 0);
             self.toggle_stat_mode(2, mmu_ref);
+            self.update_stat_irq_line(mmu_ref);
         }
 
         self.accumulated_cycles = self.accumulated_cycles.wrapping_add(t_cycles as u16);
@@ -477,6 +519,7 @@ impl PPU {
                 if self.accumulated_cycles >= 80 {
                     self.mode = Transfer;
                     self.toggle_stat_mode(3, mmu_ref);
+                    self.update_stat_irq_line(mmu_ref);
                     //mmu_ref.toggle_vram_ban(true);
                     return;
                 }
@@ -503,9 +546,10 @@ impl PPU {
                 }
             }
             Transfer => {
-                if self.accumulated_cycles >= 80 + 172 {
+                if self.accumulated_cycles >= 80 + self.mode3_cycles(mmu_ref) {
                     self.mode = HBlank;
                     self.toggle_stat_mode(0, mmu_ref);
+                    self.update_stat_irq_line(mmu_ref);
 
                     // this is where you can render the scanline
                     // optionally: fire STAT interrupt if enabled
@@ -536,6 +580,7 @@ impl PPU {
                     if self.get_ly(mmu_ref) == 144 {
                         self.mode = VBlank;
                         self.toggle_stat_mode(1, mmu_ref);
+                        self.update_stat_irq_line(mmu_ref);
 
                         // fire VBlank interrupt
                         let interrupt_flag = mmu_ref.get_byte(0xFF0F);
@@ -544,6 +589,7 @@ impl PPU {
                     } else {
                         self.mode = OAM;
                         self.toggle_stat_mode(2, mmu_ref);
+                        self.update_stat_irq_line(mmu_ref);
 
                         //mmu_ref.toggle_oam_ban(true);
                         return;
@@ -560,6 +606,7 @@ impl PPU {
                         self.window_line_counter = 0;
                         self.mode = OAM;
                         self.toggle_stat_mode(2, mmu_ref);
+                        self.update_stat_irq_line(mmu_ref);
                         return;
                     }
                 }

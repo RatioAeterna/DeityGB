@@ -2,7 +2,8 @@ use deitygb::apu::APU;
 use deitygb::cartridge_save::CartridgeSave;
 use deitygb::cpu::CPU;
 use deitygb::headless::{
-    default_boot_rom_path, load_file, GameBoy, TestOutcome, DMG_CPU_FREQUENCY, DMG_FRAME_CYCLES,
+    default_boot_rom_path, load_file, GameBoy, HardwareModel, TestOutcome, DMG_CPU_FREQUENCY,
+    DMG_FRAME_CYCLES,
 };
 use deitygb::mmu::{JoypadButton, MMU};
 use deitygb::ppu::{Sprite, PPU};
@@ -12,7 +13,10 @@ use std::sync::mpsc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn repo_path(path: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join(path)
+    std::env::var_os("DEITYGB_FIXTURE_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")))
+        .join(path)
 }
 
 fn fnv1a(bytes: &[u8]) -> u64 {
@@ -38,6 +42,24 @@ fn temp_rom_path(name: &str) -> PathBuf {
     dir.join(name)
 }
 
+fn mooneye_hardware_model(case: &str) -> Option<HardwareModel> {
+    match case {
+        "boot_regs-dmg0.gb" | "boot_div-dmg0.gb" | "boot_hwio-dmg0.gb" => {
+            Some(HardwareModel::Dmg0)
+        }
+        "boot_regs-dmgABC.gb"
+        | "boot_div-dmgABCmgb.gb"
+        | "boot_hwio-dmgABCmgb.gb"
+        | "serial/boot_sclk_align-dmgABCmgb.gb" => Some(HardwareModel::DmgAbc),
+        "boot_regs-mgb.gb" => Some(HardwareModel::Mgb),
+        "boot_regs-sgb.gb" | "boot_div-S.gb" | "boot_div2-S.gb" | "boot_hwio-S.gb" => {
+            Some(HardwareModel::Sgb)
+        }
+        "boot_regs-sgb2.gb" => Some(HardwareModel::Sgb2),
+        _ => None,
+    }
+}
+
 fn mbc3_battery_ram_rom() -> Vec<u8> {
     let mut rom = vec![0; 0x8000];
     rom[0x0147] = 0x10;
@@ -61,11 +83,12 @@ fn serial_transfer_records_internal_clock_byte() {
 
     assert!(mmu.serial_output().is_empty());
     assert_ne!(mmu.get_byte(0xFF02) & 0x80, 0);
-    cpu.update_timers(255, &mut mmu);
-    for _ in 0..15 {
+    for _ in 0..16 {
         cpu.update_timers(255, &mut mmu);
     }
     cpu.update_timers(16, &mut mmu);
+    assert!(mmu.serial_output().is_empty());
+    cpu.update_timers(1, &mut mmu);
 
     assert_eq!(mmu.serial_output(), b"P");
     assert_eq!(mmu.get_byte(0xFF01), 0xFF);
@@ -305,6 +328,23 @@ fn interrupt_flag_bus_reads_force_unused_bits_high() {
 }
 
 #[test]
+fn dmg_unused_io_bus_reads_force_unused_bits_high() {
+    let mut mmu = MMU::new();
+
+    mmu.set_byte(0xFF02, 0x00);
+    assert_eq!(mmu.get_byte(0xFF02) & 0x7E, 0x7E);
+    mmu.set_byte(0xFF07, 0x00);
+    assert_eq!(mmu.get_byte(0xFF07) & 0xF8, 0xF8);
+    mmu.set_byte(0xFF41, 0x00);
+    assert_eq!(mmu.get_byte(0xFF41) & 0x80, 0x80);
+
+    for addr in [0xFF03, 0xFF08, 0xFF0E, 0xFF15, 0xFF1F, 0xFF27, 0xFF2F, 0xFF50, 0xFF7F] {
+        mmu.set_raw_byte(addr, 0x00);
+        assert_eq!(mmu.get_byte(addr), 0xFF, "{addr:#06x}");
+    }
+}
+
+#[test]
 fn halted_cpu_does_not_fetch_cb_prefix_or_advance_pc() {
     let mut mmu = MMU::new();
     let mut cpu = CPU::new();
@@ -329,24 +369,28 @@ fn interrupt_after_halt_is_serviced_before_cb_prefix_fetch() {
     let mut mmu = MMU::new();
     let mut cpu = CPU::new();
     mmu.set_raw_byte(0xFF50, 1);
-    mmu.set_raw_byte(0x0000, 0xFB); // EI
-    mmu.set_raw_byte(0x0001, 0x00); // NOP; IME becomes active afterward.
-    mmu.set_raw_byte(0x0002, 0x76); // HALT
-    mmu.set_raw_byte(0x0003, 0xCB); // Kirby's next instruction begins with CB.
-    mmu.set_raw_byte(0x0004, 0x76);
+    mmu.set_raw_byte(0x0000, 0x31); // LD SP,0xFFFE
+    mmu.set_raw_byte(0x0001, 0xFE);
+    mmu.set_raw_byte(0x0002, 0xFF);
+    mmu.set_raw_byte(0x0003, 0xFB); // EI
+    mmu.set_raw_byte(0x0004, 0x00); // NOP; IME becomes active afterward.
+    mmu.set_raw_byte(0x0005, 0x76); // HALT
+    mmu.set_raw_byte(0x0006, 0xCB); // Kirby's next instruction begins with CB.
+    mmu.set_raw_byte(0x0007, 0x76);
 
     cpu.cycle(&mut mmu);
     cpu.cycle(&mut mmu);
     cpu.cycle(&mut mmu);
+    cpu.cycle(&mut mmu);
     assert!(cpu.is_halted());
-    assert_eq!(cpu.program_counter(), 0x0003);
+    assert_eq!(cpu.program_counter(), 0x0006);
 
     mmu.set_raw_byte(0xFFFF, 0x01);
     mmu.set_if(0x01);
     assert_eq!(cpu.cycle(&mut mmu), 20);
     assert_eq!(cpu.program_counter(), 0x0040);
-    assert_eq!(mmu.get_raw_byte(0xFFFE), 0x03);
-    assert_eq!(mmu.get_raw_byte(0xFFFF), 0x00);
+    assert_eq!(mmu.get_raw_byte(0xFFFC), 0x06);
+    assert_eq!(mmu.get_raw_byte(0xFFFD), 0x00);
 }
 
 #[test]
@@ -825,23 +869,154 @@ fn blargg_cpu_instrs_completes_with_serial_result() {
 
 #[test]
 #[ignore = "runs bundled Mooneye acceptance ROM; use for emulator regression checks"]
-fn mooneye_daa_reports_pass_or_fail() {
-    let rom = load_file(&repo_path(
-        "src/roms/mts-20240926-1737-443f6e1/acceptance/instr/daa.gb",
-    ))
-    .unwrap();
+fn mooneye_acceptance_known_passes_remain_green() {
+    let cases = [
+        "add_sp_e_timing.gb",
+        "bits/mem_oam.gb",
+        "bits/reg_f.gb",
+        "bits/unused_hwio-GS.gb",
+        "boot_div-S.gb",
+        "boot_div-dmg0.gb",
+        "boot_div-dmgABCmgb.gb",
+        "boot_div2-S.gb",
+        "boot_regs-dmgABC.gb",
+        "boot_regs-dmg0.gb",
+        "boot_regs-mgb.gb",
+        "boot_regs-sgb.gb",
+        "boot_regs-sgb2.gb",
+        "boot_hwio-S.gb",
+        "boot_hwio-dmg0.gb",
+        "boot_hwio-dmgABCmgb.gb",
+        "call_cc_timing.gb",
+        "call_cc_timing2.gb",
+        "call_timing.gb",
+        "call_timing2.gb",
+        "di_timing-GS.gb",
+        "div_timing.gb",
+        "ei_sequence.gb",
+        "ei_timing.gb",
+        "halt_ime0_ei.gb",
+        "halt_ime0_nointr_timing.gb",
+        "halt_ime1_timing.gb",
+        "halt_ime1_timing2-GS.gb",
+        "if_ie_registers.gb",
+        "instr/daa.gb",
+        "interrupts/ie_push.gb",
+        "intr_timing.gb",
+        "jp_cc_timing.gb",
+        "jp_timing.gb",
+        "ld_hl_sp_e_timing.gb",
+        "oam_dma/basic.gb",
+        "oam_dma/reg_read.gb",
+        "oam_dma/sources-GS.gb",
+        "oam_dma_restart.gb",
+        "oam_dma_start.gb",
+        "oam_dma_timing.gb",
+        "pop_timing.gb",
+        "ppu/intr_1_2_timing-GS.gb",
+        "ppu/intr_2_0_timing.gb",
+        "ppu/stat_irq_blocking.gb",
+        "push_timing.gb",
+        "rapid_di_ei.gb",
+        "ret_cc_timing.gb",
+        "ret_timing.gb",
+        "reti_intr_timing.gb",
+        "reti_timing.gb",
+        "rst_timing.gb",
+        "serial/boot_sclk_align-dmgABCmgb.gb",
+        "timer/div_write.gb",
+        "timer/rapid_toggle.gb",
+        "timer/tim00.gb",
+        "timer/tim00_div_trigger.gb",
+        "timer/tim01.gb",
+        "timer/tim01_div_trigger.gb",
+        "timer/tim10.gb",
+        "timer/tim10_div_trigger.gb",
+        "timer/tim11.gb",
+        "timer/tim11_div_trigger.gb",
+        "timer/tima_reload.gb",
+        "timer/tima_write_reloading.gb",
+        "timer/tma_write_reloading.gb",
+    ];
     let boot = load_file(&default_boot_rom_path()).unwrap();
-    let mut gb = GameBoy::new();
-    gb.load_boot_rom(&boot);
-    gb.load_rom(&rom);
+    for case in cases {
+        let rom = load_file(&repo_path(&format!(
+            "src/roms/mts-20240926-1737-443f6e1/acceptance/{case}"
+        )))
+        .unwrap();
+        let mut gb = GameBoy::new();
+        gb.set_apu_enabled(false);
+        gb.load_rom(&rom);
+        if let Some(model) = mooneye_hardware_model(case) {
+            gb.apply_hardware_model_post_boot(model);
+        } else {
+            gb.load_boot_rom(&boot);
+        }
 
-    let report = gb.run_until(DMG_CPU_FREQUENCY * 30);
-    assert_ne!(
-        report.outcome,
-        TestOutcome::Timeout,
-        "serial: {:?}",
-        report.serial
+        let report = gb.run_until(DMG_CPU_FREQUENCY * 10);
+        assert_eq!(
+            report.outcome,
+            TestOutcome::Passed,
+            "{case}: serial={:?} bc={:#06x} de={:#06x} hl={:#06x}",
+            report.serial,
+            gb.cpu.bc(),
+            gb.cpu.de(),
+            gb.cpu.hl()
+        );
+    }
+}
+
+#[test]
+#[ignore = "runs the bundled Mooneye acceptance tree and records the current pass/fail map"]
+fn mooneye_acceptance_suite_reports_no_timeouts() {
+    fn collect_roms(dir: &Path, roms: &mut Vec<PathBuf>) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                collect_roms(&path, roms);
+            } else if path.extension().is_some_and(|extension| extension == "gb") {
+                roms.push(path);
+            }
+        }
+    }
+
+    let root = repo_path("src/roms/mts-20240926-1737-443f6e1/acceptance");
+    let boot = load_file(&default_boot_rom_path()).unwrap();
+    let mut roms = Vec::new();
+    collect_roms(&root, &mut roms);
+    roms.sort();
+
+    let mut passed = Vec::new();
+    let mut failed = Vec::new();
+    let mut timed_out = Vec::new();
+    for path in roms {
+        let rom = load_file(&path).unwrap();
+        let mut gb = GameBoy::new();
+        gb.set_apu_enabled(false);
+        gb.load_rom(&rom);
+
+        let name = path.strip_prefix(&root).unwrap().display().to_string();
+        if let Some(model) = mooneye_hardware_model(&name) {
+            gb.apply_hardware_model_post_boot(model);
+        } else {
+            gb.load_boot_rom(&boot);
+        }
+
+        let report = gb.run_until(DMG_CPU_FREQUENCY * 10);
+        match report.outcome {
+            TestOutcome::Passed => passed.push(name),
+            TestOutcome::Failed => failed.push(name),
+            TestOutcome::Timeout => timed_out.push(name),
+        }
+    }
+
+    assert!(
+        timed_out.is_empty(),
+        "Mooneye acceptance timeouts: {:?}",
+        timed_out
     );
+    assert_eq!(passed.len(), 66, "passed cases changed: {:?}", passed);
+    assert_eq!(failed.len(), 9, "failed cases changed: {:?}", failed);
 }
 
 #[test]

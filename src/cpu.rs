@@ -1,6 +1,7 @@
 use crate::mmu as mmu;
 use crate::cpu_tables as cpu_tables;
 use crate::disassembler::Disassembler;
+use crate::ppu::PPU;
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -520,10 +521,25 @@ pub struct CPU {
 
         dis : Disassembler,
 
+	}
+
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PostBootRegisters {
+    pub a: u8,
+    pub f: u8,
+    pub b: u8,
+    pub c: u8,
+    pub d: u8,
+    pub e: u8,
+    pub h: u8,
+    pub l: u8,
+    pub sp: u16,
+    pub pc: u16,
 }
 
 
-impl CPU  {
+	impl CPU  {
 
     pub fn new() -> CPU {
         CPU {
@@ -546,8 +562,27 @@ impl CPU  {
         }
     }
 
-    pub fn set_trace_enabled(&mut self, enabled: bool) {
-        self.trace_enabled = enabled;
+	    pub fn set_trace_enabled(&mut self, enabled: bool) {
+	        self.trace_enabled = enabled;
+	    }
+
+    pub fn apply_post_boot_registers(&mut self, registers: PostBootRegisters) {
+        self.a = registers.a;
+        self.f = registers.f & 0xF0;
+        self.b = registers.b;
+        self.c = registers.c;
+        self.d = registers.d;
+        self.e = registers.e;
+        self.h = registers.h;
+        self.l = registers.l;
+        self.set_sp(registers.sp);
+        self.pc = registers.pc;
+        self.stop_flag = false;
+        self.halt_flag = false;
+        self.ime = false;
+        self.ei_pending = false;
+        self.di_pending = false;
+        self.cgb_handoff_done = true;
     }
 
     pub fn program_counter(&self) -> u16 {
@@ -560,6 +595,10 @@ impl CPU  {
 
     pub fn stack_pointer(&self) -> u16 {
         self.get_sp()
+    }
+
+    pub fn bc(&self) -> u16 {
+        self.get_bc()
     }
 
     pub fn hl(&self) -> u16 {
@@ -650,33 +689,48 @@ impl CPU  {
         }
     }
 
-    // pushes a value onto the stack, decrements sp
-    fn stack_push(&mut self, mmu_ref : &mut mmu::MMU, val : u16) {
+    fn stack_push_at(
+        &mut self,
+        mmu_ref: &mut mmu::MMU,
+        ppu_ref: &mut Option<&mut PPU>,
+        val: u16,
+        high_cycle: u8,
+        low_cycle: u8,
+    ) {
         let old_sp = self.get_sp();
         mmu_ref.trigger_oam_idu_corruption_at(old_sp, 0);
         let mut sp = old_sp.wrapping_sub(1);
-        mmu_ref.trigger_oam_write_corruption_at(sp, 4);
-        mmu_ref.set_byte(sp as usize, (val >> 8) as u8); // high byte
+        mmu_ref.trigger_oam_write_corruption_at(sp, u16::from(high_cycle));
+        self.timed_write(mmu_ref, ppu_ref, sp as usize, (val >> 8) as u8, high_cycle);
 
         sp = sp.wrapping_sub(1);
-        mmu_ref.trigger_oam_write_corruption_at(sp, 8);
-        mmu_ref.set_byte(sp as usize, (val & 0xFF) as u8); // low byte
+        mmu_ref.trigger_oam_write_corruption_at(sp, u16::from(low_cycle));
+        self.timed_write(mmu_ref, ppu_ref, sp as usize, (val & 0xFF) as u8, low_cycle);
 
-        //println!("STACK PUSH! {:#04x}", val);
         self.set_sp(sp);
     }
 
     // pops a word off the stack, increments sp
     fn stack_pop(&mut self, mmu_ref : &mut mmu::MMU) -> u16 {
+        self.stack_pop_at(mmu_ref, &mut None, 0, 4)
+    }
+
+    fn stack_pop_at(
+        &mut self,
+        mmu_ref: &mut mmu::MMU,
+        ppu_ref: &mut Option<&mut PPU>,
+        low_cycle: u8,
+        high_cycle: u8,
+    ) -> u16 {
         let mut sp = self.get_sp() as usize;
         //println!("sp_val: {:#04x}", self.get_sp());
 
-        mmu_ref.trigger_oam_read_idu_corruption_at(sp as u16, 0);
-        let low_byte = mmu_ref.get_byte(sp);
+        mmu_ref.trigger_oam_read_idu_corruption_at(sp as u16, u16::from(low_cycle));
+        let low_byte = self.timed_read(mmu_ref, ppu_ref, sp, low_cycle);
         sp = sp.wrapping_add(1);
 
-        mmu_ref.trigger_oam_read_corruption_at(sp as u16, 4);
-        let high_byte = mmu_ref.get_byte(sp);
+        mmu_ref.trigger_oam_read_corruption_at(sp as u16, u16::from(high_cycle));
+        let high_byte = self.timed_read(mmu_ref, ppu_ref, sp, high_cycle);
         sp = sp.wrapping_add(1);
 
         self.set_sp(sp as u16);
@@ -685,6 +739,15 @@ impl CPU  {
     }
 
     pub fn update_timers(&mut self, t_cycles : u8, mmu_ref : &mut mmu::MMU) {
+        self.update_system_clocks(t_cycles, mmu_ref, None);
+    }
+
+    fn update_system_clocks(
+        &mut self,
+        t_cycles: u8,
+        mmu_ref: &mut mmu::MMU,
+        ppu_ref: Option<&mut PPU>,
+    ) {
         let tac_reg = mmu_ref.get_byte(0xFF07 as usize);
         let enabled_bit = tac_reg & 0b100;
         let clock_select = tac_reg & 0b11;
@@ -698,7 +761,8 @@ impl CPU  {
         }
 
         // TODO too many function calls but whatever for now
-        for i in 0..t_cycles {
+        for _ in 0..t_cycles {
+            mmu_ref.tick_oam_dma();
             mmu_ref.tick_tima_reload();
             mmu_ref.tick_serial();
             let old_div : u16 = mmu_ref.fetch_div();
@@ -713,6 +777,10 @@ impl CPU  {
                 mmu_ref.increment_tima();
             }
         }
+        if let Some(ppu) = ppu_ref {
+            let peripheral_cycles = mmu_ref.peripheral_cycles(t_cycles);
+            ppu.cycle(peripheral_cycles, mmu_ref);
+        }
 
 
         
@@ -722,37 +790,91 @@ impl CPU  {
         // write to TMA on the same cycle that you overflow TIMA
     }
 
-    fn advance_timers_to(&mut self, target: u8, mmu_ref: &mut mmu::MMU) {
+    fn advance_timers_to(
+        &mut self,
+        target: u8,
+        mmu_ref: &mut mmu::MMU,
+        ppu_ref: &mut Option<&mut PPU>,
+    ) {
         if target > self.timer_cycles_advanced {
-            self.update_timers(target - self.timer_cycles_advanced, mmu_ref);
+            self.update_system_clocks(
+                target - self.timer_cycles_advanced,
+                mmu_ref,
+                ppu_ref.as_deref_mut(),
+            );
             self.timer_cycles_advanced = target;
         }
     }
 
-    fn timed_read(&mut self, mmu_ref: &mut mmu::MMU, addr: usize, at_cycle: u8) -> u8 {
-        self.advance_timers_to(at_cycle, mmu_ref);
+    fn timed_read(
+        &mut self,
+        mmu_ref: &mut mmu::MMU,
+        ppu_ref: &mut Option<&mut PPU>,
+        addr: usize,
+        at_cycle: u8,
+    ) -> u8 {
+        self.advance_timers_to(at_cycle, mmu_ref, ppu_ref);
         mmu_ref.get_byte(addr)
     }
 
-    fn timed_write(&mut self, mmu_ref: &mut mmu::MMU, addr: usize, data: u8, at_cycle: u8) {
-        self.advance_timers_to(at_cycle, mmu_ref);
+    fn timed_write(
+        &mut self,
+        mmu_ref: &mut mmu::MMU,
+        ppu_ref: &mut Option<&mut PPU>,
+        addr: usize,
+        data: u8,
+        at_cycle: u8,
+    ) {
+        self.advance_timers_to(at_cycle, mmu_ref, ppu_ref);
         mmu_ref.set_byte(addr, data);
     }
 
-    fn service_interrupt(&mut self, pending_interrupts: u8, mmu_ref: &mut mmu::MMU) -> u8 {
-        let interrupt_vectors = [0x40, 0x48, 0x50, 0x58, 0x60];
-        let interrupt = (0..5)
-            .find(|bit| pending_interrupts & (1 << bit) != 0)
-            .expect("service_interrupt requires a pending interrupt");
-        let mask = 1 << interrupt;
+    fn timed_immediate_word(&mut self, mmu_ref: &mut mmu::MMU) -> u16 {
+        let low_addr = self.pc.wrapping_add(1) as usize;
+        let high_addr = self.pc.wrapping_add(2) as usize;
+        let low = if (0xFE00..=0xFE9F).contains(&low_addr) {
+            self.timed_read(mmu_ref, &mut None, low_addr, 0)
+        } else {
+            self.fetch(low_addr as u16, mmu_ref)
+        };
+        let high = if (0xFE00..=0xFE9F).contains(&high_addr) {
+            self.timed_read(mmu_ref, &mut None, high_addr, 4)
+        } else {
+            self.fetch(high_addr as u16, mmu_ref)
+        };
+        u16::from(low) | (u16::from(high) << 8)
+    }
 
-        let interrupt_flags = mmu_ref.get_if();
-        mmu_ref.set_if(interrupt_flags & !mask);
+    fn service_interrupt(&mut self, mmu_ref: &mut mmu::MMU, ppu_ref: &mut Option<&mut PPU>) -> u8 {
+        let interrupt_vectors = [0x40, 0x48, 0x50, 0x58, 0x60];
         self.ime = false;
         self.set_sp(self.get_sp().wrapping_sub(1));
-        self.timed_write(mmu_ref, self.get_sp() as usize, (self.pc >> 8) as u8, 8);
+        self.timed_write(
+            mmu_ref,
+            ppu_ref,
+            self.get_sp() as usize,
+            (self.pc >> 8) as u8,
+            8,
+        );
+
+        let pending_after_high_push = mmu_ref.get_ie() & mmu_ref.get_if() & 0x1F;
+        let Some(interrupt) = (0..5).find(|bit| pending_after_high_push & (1 << bit) != 0) else {
+            self.pc = 0x0000;
+            self.halt_bug_enabled = false;
+            return 20;
+        };
+        let mask = 1 << interrupt;
+        let interrupt_flags = mmu_ref.get_if();
+        mmu_ref.set_if(interrupt_flags & !mask);
+
         self.set_sp(self.get_sp().wrapping_sub(1));
-        self.timed_write(mmu_ref, self.get_sp() as usize, (self.pc & 0xFF) as u8, 12);
+        self.timed_write(
+            mmu_ref,
+            ppu_ref,
+            self.get_sp() as usize,
+            (self.pc & 0xFF) as u8,
+            12,
+        );
         self.pc = interrupt_vectors[interrupt];
         self.halt_bug_enabled = false;
 
@@ -762,6 +884,14 @@ impl CPU  {
 
     // performs a F/D/E/WB cycle
     pub fn cycle(&mut self, mmu_ref : &mut mmu::MMU) -> u8 {
+        self.cycle_inner(mmu_ref, &mut None)
+    }
+
+    pub fn cycle_with_ppu(&mut self, mmu_ref: &mut mmu::MMU, ppu_ref: &mut PPU) -> u8 {
+        self.cycle_inner(mmu_ref, &mut Some(ppu_ref))
+    }
+
+    fn cycle_inner(&mut self, mmu_ref : &mut mmu::MMU, ppu_ref: &mut Option<&mut PPU>) -> u8 {
         self.timer_cycles_advanced = 0;
         if self.stop_flag {
             return 0;
@@ -771,15 +901,19 @@ impl CPU  {
         if self.halt_flag {
             if pending_interrupts == 0 {
                 let cycles = 4;
-                self.update_timers(cycles, mmu_ref);
+                self.update_system_clocks(cycles, mmu_ref, ppu_ref.as_deref_mut());
                 return cycles;
             }
             self.halt_flag = false;
         }
 
         if self.ime && pending_interrupts != 0 {
-            let cycles = self.service_interrupt(pending_interrupts, mmu_ref);
-            self.update_timers(cycles - self.timer_cycles_advanced, mmu_ref);
+            let cycles = self.service_interrupt(mmu_ref, ppu_ref);
+            self.update_system_clocks(
+                cycles - self.timer_cycles_advanced,
+                mmu_ref,
+                ppu_ref.as_deref_mut(),
+            );
             return cycles;
         }
 
@@ -788,7 +922,7 @@ impl CPU  {
         self.halt_bug_enabled = false;
 
         // check for 0xCB prefix
-        let first_opcode = self.fetch(self.pc, mmu_ref);
+        let first_opcode = mmu_ref.get_opcode_byte(self.pc as usize);
         let cb_prefix : bool = first_opcode == 0xCB;
         if cb_prefix {
             if !apply_halt_bug {
@@ -801,7 +935,7 @@ impl CPU  {
             self.pc = self.pc.wrapping_sub(1);
         }
         next_opcode = if cb_prefix {
-            self.fetch(self.pc, mmu_ref)
+            mmu_ref.get_opcode_byte(self.pc as usize)
         } else {
             first_opcode
         };
@@ -816,7 +950,7 @@ impl CPU  {
         }
 
         // returns the number of cycles for the current instruction
-        let cycles = self.decode_execute(next_opcode, mmu_ref, cb_prefix);
+        let cycles = self.decode_execute(next_opcode, mmu_ref, ppu_ref, cb_prefix);
 
         // The bundled DMG boot ROM cannot provide the CGB register state itself.
         // Preserve its visual boot sequence, then expose CGB hardware to dual-mode
@@ -828,7 +962,11 @@ impl CPU  {
             self.cgb_handoff_done = true;
         }
 
-        self.update_timers(cycles - self.timer_cycles_advanced, mmu_ref);
+        self.update_system_clocks(
+            cycles - self.timer_cycles_advanced,
+            mmu_ref,
+            ppu_ref.as_deref_mut(),
+        );
 
         return cycles;
     }
@@ -846,13 +984,20 @@ impl CPU  {
             return b1 | b2; // we have to mind the little-endianness of the GB EMU.
     }
 
-    fn decode_execute(&mut self, mut opcode : u8, mmu_ref : &mut mmu::MMU, cb_prefix : bool) -> u8 {
+    fn decode_execute(
+        &mut self,
+        mut opcode : u8,
+        mmu_ref : &mut mmu::MMU,
+        ppu_ref: &mut Option<&mut PPU>,
+        cb_prefix : bool,
+    ) -> u8 {
             let i1 = ((opcode & 0xF0) >> 4) as usize;
             let i2 = (opcode & 0x0F) as usize;
             let mut cycles : u8 = ternary!(cb_prefix, cpu_tables::cb_prefixed_cycle_times[i1][i2], cpu_tables::cycle_times[i1][i2]);
             mmu_ref.apu_bus_cycles = cycles;
             let	instruction_size : u8 = ternary!(cb_prefix, 2, cpu_tables::instruction_sizes[i1][i2]);
             let mut skip_increment = false;
+            let ei_was_pending = self.ei_pending;
 
             let nn = self.next_word(self.pc+1, mmu_ref);
             let n = self.fetch(self.pc+1, mmu_ref);
@@ -877,7 +1022,7 @@ impl CPU  {
                         let bit = (opcode >> 3) & 0x07;
                         let is_bit_test = (0x40..=0x7F).contains(&opcode);
                         let read_cycle = if is_bit_test { cycles - 8 } else { cycles - 12 };
-                        let value = self.timed_read(mmu_ref, addr, read_cycle);
+                        let value = self.timed_read(mmu_ref, ppu_ref, addr, read_cycle);
                         let result = match opcode {
                             0x00..=0x3F => Some(match bit {
                                 0 => rlc(value, &mut self.f),
@@ -898,7 +1043,7 @@ impl CPU  {
                             0xC0..=0xFF => Some(value | (1 << bit)),
                         };
                         if let Some(result) = result {
-                            self.timed_write(mmu_ref, addr, result, cycles - 8);
+                            self.timed_write(mmu_ref, ppu_ref, addr, result, cycles - 8);
                         }
                     } else {
                     match opcode {
@@ -1309,18 +1454,18 @@ impl CPU  {
                             },
                             0x34 => {
                                 let addr = self.get_hl() as usize;
-                                let at_hl = self.timed_read(mmu_ref, addr, cycles - 12);
+                                let at_hl = self.timed_read(mmu_ref, ppu_ref, addr, cycles - 12);
                                 let new_at_hl = inc_reg(at_hl, &mut self.f);
-                                self.timed_write(mmu_ref, addr, new_at_hl, cycles - 8);
+                                self.timed_write(mmu_ref, ppu_ref, addr, new_at_hl, cycles - 8);
                             },
                             0x35 => {
                                 let addr = self.get_hl() as usize;
-                                let at_hl = self.timed_read(mmu_ref, addr, cycles - 12);
+                                let at_hl = self.timed_read(mmu_ref, ppu_ref, addr, cycles - 12);
                                 let new_at_hl = dec_reg(at_hl, &mut self.f);
-                                self.timed_write(mmu_ref, addr, new_at_hl, cycles - 8);
+                                self.timed_write(mmu_ref, ppu_ref, addr, new_at_hl, cycles - 8);
                             },
                             0x36 => {
-                                self.timed_write(mmu_ref, self.get_hl() as usize, n, cycles - 8);
+                                self.timed_write(mmu_ref, ppu_ref, self.get_hl() as usize, n, cycles - 8);
                             },
                             0x37 => scf(&mut self.f),
                             0x38 => {
@@ -1501,39 +1646,41 @@ impl CPU  {
                             0xBF => compare(self.a, self.a, &mut self.f),
                             0xC0 => {
                                 if !get_flag(&mut self.f, ZERO) {
-                                    self.pc = self.stack_pop(mmu_ref);
+                                    self.pc = self.stack_pop_at(mmu_ref, ppu_ref, 4, 8);
                                     skip_increment = true;
                                     cycles = 20;
                                 }
                             },
                             0xC1 => {let bc_val = self.stack_pop(mmu_ref); self.set_bc(bc_val);},
                             0xC2 => {
+                                let target = self.timed_immediate_word(mmu_ref);
                                 if !get_flag(&mut self.f, ZERO) {
-                                    self.pc = nn;     
+                                    self.pc = target;
                                     skip_increment = true;
                                     cycles = 16;
                                 }
                             },
-                            0xC3 => self.pc = nn - (instruction_size as u16),
+                            0xC3 => self.pc = self.timed_immediate_word(mmu_ref) - (instruction_size as u16),
                             0xC4 => {
+                                let target = self.timed_immediate_word(mmu_ref);
                                 if(!get_flag(&mut self.f, ZERO)) {
                                     self.pc += instruction_size as u16;
-                                    self.stack_push(mmu_ref, self.pc);
-                                    self.pc = nn;
+                                    self.stack_push_at(mmu_ref, ppu_ref, self.pc, 12, 16);
+                                    self.pc = target;
                                     skip_increment = true;
                                     cycles = 24;
                                 }
                             },
-                            0xC5 => self.stack_push(mmu_ref, self.get_bc()),
+                            0xC5 => self.stack_push_at(mmu_ref, ppu_ref, self.get_bc(), 4, 8),
                             0xC6 => self.a = add_reg(self.a, n, &mut self.f),
                             0xC7 => {
-                                self.stack_push(mmu_ref, self.pc+1);
+                                self.stack_push_at(mmu_ref, ppu_ref, self.pc+1, 4, 8);
                                 self.pc = 0x00;
                                 skip_increment = true;
                             },
                             0xC8 => {
                                 if(get_flag(&mut self.f, ZERO)) {
-                                    self.pc = self.stack_pop(mmu_ref);
+                                    self.pc = self.stack_pop_at(mmu_ref, ppu_ref, 4, 8);
                                     skip_increment = true;
                                     cycles = 20;
                                 }
@@ -1545,69 +1692,74 @@ impl CPU  {
                                 skip_increment = true;
                             },
                             0xCA => {
+                                let target = self.timed_immediate_word(mmu_ref);
                                 if get_flag(&mut self.f, ZERO) {
-                                    self.pc = nn;     
+                                    self.pc = target;
                                     skip_increment = true;
                                     cycles = 16;
                                 }
                             },
                             0xCB => (), // this is just the CB prefix
                             0xCC => {
+                                let target = self.timed_immediate_word(mmu_ref);
                                 if(get_flag(&mut self.f, ZERO)) {
                                     self.pc += instruction_size as u16;
-                                    self.stack_push(mmu_ref, self.pc);
-                                    self.pc = nn;
+                                    self.stack_push_at(mmu_ref, ppu_ref, self.pc, 12, 16);
+                                    self.pc = target;
                                     skip_increment = true;
                                     cycles = 24;
                                 }
                             },
                             0xCD => {
+                                let target = self.timed_immediate_word(mmu_ref);
                                 self.pc += instruction_size as u16;
-                                self.stack_push(mmu_ref, self.pc);
-                                self.pc = nn;
+                                self.stack_push_at(mmu_ref, ppu_ref, self.pc, 12, 16);
+                                self.pc = target;
                                 skip_increment = true;
                             },
                             0xCE => self.a = adc_reg(self.a, n, &mut self.f),
                             0xCF => {
-                                self.stack_push(mmu_ref, self.pc+1);
+                                self.stack_push_at(mmu_ref, ppu_ref, self.pc+1, 4, 8);
                                 self.pc = 0x08;
                                 skip_increment = true;
                             },
                             0xD0 => {
                                 if !get_flag(&mut self.f, CARRY) {
-                                    self.pc = self.stack_pop(mmu_ref);
+                                    self.pc = self.stack_pop_at(mmu_ref, ppu_ref, 4, 8);
                                     skip_increment = true;
                                     cycles = 20;
                                 }
                             },
                             0xD1 => {let de_val = self.stack_pop(mmu_ref); self.set_de(de_val);},
                             0xD2 => {
+                                let target = self.timed_immediate_word(mmu_ref);
                                 if !get_flag(&mut self.f, CARRY) {
-                                    self.pc = nn;     
+                                    self.pc = target;
                                     skip_increment = true;
                                     cycles = 16;
                                 }
                             }
                             0xD3 => (),
                             0xD4 => {
+                                let target = self.timed_immediate_word(mmu_ref);
                                 if(!get_flag(&mut self.f, CARRY)) {
                                     self.pc += instruction_size as u16;
-                                    self.stack_push(mmu_ref, self.pc);
-                                    self.pc = nn;
+                                    self.stack_push_at(mmu_ref, ppu_ref, self.pc, 12, 16);
+                                    self.pc = target;
                                     skip_increment = true;
                                     cycles = 24;
                                 }
                             },
-                            0xD5 => self.stack_push(mmu_ref, self.get_de()),
+                            0xD5 => self.stack_push_at(mmu_ref, ppu_ref, self.get_de(), 4, 8),
                             0xD6 => self.a = sub_reg(self.a, n, &mut self.f),
                             0xD7 => {
-                                self.stack_push(mmu_ref, self.pc+1);
+                                self.stack_push_at(mmu_ref, ppu_ref, self.pc+1, 4, 8);
                                 self.pc = 0x10;
                                 skip_increment = true;
                             },
                             0xD8 => {
                                 if(get_flag(&mut self.f, CARRY)) {
-                                    self.pc = self.stack_pop(mmu_ref);
+                                    self.pc = self.stack_pop_at(mmu_ref, ppu_ref, 4, 8);
                                     skip_increment = true;
                                     cycles = 20;
                                 }
@@ -1619,18 +1771,20 @@ impl CPU  {
                                 //println!("EXECUTING RETI, IME NOW: {}", self.ime);
                             },
                             0xDA => {
+                                let target = self.timed_immediate_word(mmu_ref);
                                 if get_flag(&mut self.f, CARRY) {
-                                    self.pc = nn;     
+                                    self.pc = target;
                                     skip_increment = true;
                                     cycles = 16;
                                 }
                             },
                             0xDB => (),
                             0xDC => {
+                                let target = self.timed_immediate_word(mmu_ref);
                                 if(get_flag(&mut self.f, CARRY)) {
                                     self.pc += instruction_size as u16;
-                                    self.stack_push(mmu_ref, self.pc);
-                                    self.pc = nn;
+                                    self.stack_push_at(mmu_ref, ppu_ref, self.pc, 12, 16);
+                                    self.pc = target;
                                     skip_increment = true;
                                     cycles = 24;
                                 }
@@ -1638,19 +1792,25 @@ impl CPU  {
                             0xDD => (),
                             0xDE => self.a = sbc_reg(self.a, n, &mut self.f),
                             0xDF => {
-                                self.stack_push(mmu_ref, self.pc+1);
+                                self.stack_push_at(mmu_ref, ppu_ref, self.pc+1, 4, 8);
                                 self.pc = 0x18;
                                 skip_increment = true;
                             },
-                            0xE0 => self.timed_write(mmu_ref, (0xFF00 + (n as u16)) as usize, self.a, cycles - 8),
+                            0xE0 => self.timed_write(
+                                mmu_ref,
+                                ppu_ref,
+                                (0xFF00 + (n as u16)) as usize,
+                                self.a,
+                                cycles - 8,
+                            ),
                             0xE1 => {let hl_val = self.stack_pop(mmu_ref); self.set_hl(hl_val);},
                             0xE2 => mmu_ref.set_byte((0xFF00 + (self.c as u16)) as usize, self.a),
                             0xE3 => (),
                             0xE4 => (),
-                            0xE5 => self.stack_push(mmu_ref, self.get_hl()),
+                            0xE5 => self.stack_push_at(mmu_ref, ppu_ref, self.get_hl(), 4, 8),
                             0xE6 => and(&mut self.a, n, &mut self.f),
                             0xE7 => {
-                                self.stack_push(mmu_ref, self.pc+1);
+                                self.stack_push_at(mmu_ref, ppu_ref, self.pc+1, 4, 8);
                                 self.pc = 0x20;
                                 skip_increment = true;
                             },
@@ -1675,25 +1835,42 @@ impl CPU  {
                                 self.set_sp(new_sp);
                             },
                             0xE9 => self.pc = self.get_hl() - (instruction_size as u16),
-                            0xEA => self.timed_write(mmu_ref, nn as usize, self.a, cycles - 8),
+                            0xEA => self.timed_write(
+                                mmu_ref,
+                                ppu_ref,
+                                nn as usize,
+                                self.a,
+                                cycles - 8,
+                            ),
                             0xEB => (),
                             0xEC => (),
                             0xED => (),
                             0xEE => xor(&mut self.a, n, &mut self.f),
                             0xEF => {
-                                self.stack_push(mmu_ref, self.pc+1);
+                                self.stack_push_at(mmu_ref, ppu_ref, self.pc+1, 4, 8);
                                 self.pc = 0x28;
                                 skip_increment = true;
                             },
-                            0xF0 => self.a = self.timed_read(mmu_ref, 0xFF00 + n as usize, cycles - 8),
+                            0xF0 => {
+                                self.a = self.timed_read(
+                                    mmu_ref,
+                                    ppu_ref,
+                                    0xFF00 + n as usize,
+                                    cycles - 8,
+                                )
+                            }
                             0xF1 => {let af_val = self.stack_pop(mmu_ref); self.set_af(af_val);},
                             0xF2 => self.a = mmu_ref.get_byte((0xFF00 + (self.c as u16) as usize)),
-                            0xF3 => self.di_pending = true,
+                            0xF3 => {
+                                self.ime = false;
+                                self.ei_pending = false;
+                                self.di_pending = false;
+                            },
                             0xF4 => (),
-                            0xF5 => self.stack_push(mmu_ref, self.get_af()),
+                            0xF5 => self.stack_push_at(mmu_ref, ppu_ref, self.get_af(), 4, 8),
                             0xF6 => or(&mut self.a, n, &mut self.f),
                             0xF7 => {
-                                self.stack_push(mmu_ref, self.pc+1);
+                                self.stack_push_at(mmu_ref, ppu_ref, self.pc+1, 4, 8);
                                 self.pc = 0x30;
                                 skip_increment = true;
                             },
@@ -1716,13 +1893,16 @@ impl CPU  {
                                 let hl = self.get_hl(); 
                                 self.set_sp(hl);
                             },
-                            0xFA => self.a = self.timed_read(mmu_ref, nn as usize, cycles - 8),
+                            0xFA => {
+                                self.a =
+                                    self.timed_read(mmu_ref, ppu_ref, nn as usize, cycles - 8)
+                            }
                             0xFB => self.ei_pending = true, 
                             0xFC => (),
                             0xFD => (),
                             0xFE => compare(self.a, n, &mut self.f),
                             0xFF => {
-                                self.stack_push(mmu_ref, self.pc+1);
+                                self.stack_push_at(mmu_ref, ppu_ref, self.pc+1, 4, 8);
                                 self.pc = 0x38;
                                 skip_increment = true;
                             },
@@ -1740,13 +1920,9 @@ impl CPU  {
             }
 
 
-    if self.ei_pending && !((opcode == 0xFB) && (!cb_prefix)) {
+    if ei_was_pending && !((opcode == 0xF3) && (!cb_prefix)) {
         self.ime = true;
         self.ei_pending = false;
-    }
-    if self.di_pending && !((opcode == 0xF3) && (!cb_prefix)) {
-        self.ime = false;
-        self.di_pending = false;
     }
 
 

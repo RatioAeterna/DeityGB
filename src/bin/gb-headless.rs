@@ -1,6 +1,6 @@
 use deitygb::headless::{
-    default_boot_rom_path_for_rom, load_file, write_ppm, GameBoy, TestOutcome, DMG_CPU_FREQUENCY,
-    DMG_FRAME_CYCLES,
+    default_boot_rom_path_for_rom, load_file, write_ppm, GameBoy, HardwareModel, TestOutcome,
+    DMG_CPU_FREQUENCY, DMG_FRAME_CYCLES,
 };
 use deitygb::mmu::JoypadButton;
 use std::env;
@@ -45,7 +45,7 @@ fn main() {
     let rom_path = match args.next() {
         Some(path) => PathBuf::from(path),
         None => {
-            eprintln!("usage: gb-headless <rom.gb> [--seconds N] [--boot path] [--dump-frame path.ppm] [--press BUTTON@SECOND] [--no-apu] [--dmg] [--trace]");
+            eprintln!("usage: gb-headless <rom.gb> [--seconds N] [--boot path] [--dump-frame path.ppm] [--press BUTTON@SECOND] [--no-apu] [--dmg] [--model dmg0|dmgabc|mgb|sgb|sgb2] [--trace]");
             std::process::exit(2);
         }
     };
@@ -57,6 +57,7 @@ fn main() {
     let mut input_events = Vec::new();
     let mut apu_enabled = true;
     let mut force_dmg = false;
+    let mut hardware_model = None;
     let mut trace = false;
 
     while let Some(arg) = args.next() {
@@ -94,6 +95,15 @@ fn main() {
             "--dmg" => {
                 force_dmg = true;
             }
+            "--model" => {
+                let value = args.next().expect("--model requires a value");
+                hardware_model = Some(
+                    HardwareModel::parse(&value)
+                        .unwrap_or_else(|| panic!("unknown hardware model: {}", value)),
+                );
+                load_boot = false;
+                boot_path = None;
+            }
             "--trace" => {
                 trace = true;
             }
@@ -111,6 +121,9 @@ fn main() {
     let save_report = gb
         .load_rom_from_path(&rom_path)
         .expect("failed to read ROM");
+    if let Some(model) = hardware_model {
+        gb.apply_hardware_model_post_boot(model);
+    }
     if load_boot && boot_path.is_none() {
         let rom = load_file(&rom_path).expect("failed to reread ROM for boot ROM selection");
         boot_path = Some(default_boot_rom_path_for_rom(&rom));
@@ -163,12 +176,13 @@ fn main() {
     }
     let pc = gb.cpu.program_counter();
     println!(
-        "state: bank={:#04x} pc={:#06x} sp={:#06x} hl={:#06x} de={:#06x} halted={} ime={} cgb={} double_speed={} key1={:#04x} lcdc={:#04x} stat={:#04x} ly={} lyc={} ie={:#04x} if={:#04x} div={:#06x} tima={:#04x} tma={:#04x} tac={:#04x} joyp={:#04x} ff8b={:#04x} ff8c={:#04x} ff8e={:#04x} ff94={:#04x} d03b={:#04x} bgp={:#04x} scx={} scy={}",
+        "state: bank={:#04x} pc={:#06x} sp={:#06x} bc={:#06x} de={:#06x} hl={:#06x} halted={} ime={} cgb={} double_speed={} key1={:#04x} lcdc={:#04x} stat={:#04x} ly={} lyc={} ie={:#04x} if={:#04x} div={:#06x} tima={:#04x} tma={:#04x} tac={:#04x} joyp={:#04x} ff80={:#04x} ff81={:#04x} ff82={:#04x} ff83={:#04x} ff84={:#04x} ff85={:#04x} ff86={:#04x} ff87={:#04x} ff88={:#04x} ff89={:#04x} ff8a={:#04x} ff8b={:#04x} ff8c={:#04x} ff8d={:#04x} ff8e={:#04x} ff8f={:#04x} ff90={:#04x} ff94={:#04x} d03b={:#04x} bgp={:#04x} scx={} scy={}",
         gb.mmu.mapped_rom_bank(pc),
         pc,
         gb.cpu.stack_pointer(),
-        gb.cpu.hl(),
+        gb.cpu.bc(),
         gb.cpu.de(),
+        gb.cpu.hl(),
         gb.cpu.is_halted(),
         gb.cpu.interrupts_enabled(),
         gb.mmu.cgb_mode(),
@@ -185,9 +199,23 @@ fn main() {
         gb.mmu.get_byte(0xFF06),
         gb.mmu.get_byte(0xFF07),
         gb.mmu.get_byte(0xFF00),
+        gb.mmu.get_byte(0xFF80),
+        gb.mmu.get_byte(0xFF81),
+        gb.mmu.get_byte(0xFF82),
+        gb.mmu.get_byte(0xFF83),
+        gb.mmu.get_byte(0xFF84),
+        gb.mmu.get_byte(0xFF85),
+        gb.mmu.get_byte(0xFF86),
+        gb.mmu.get_byte(0xFF87),
+        gb.mmu.get_byte(0xFF88),
+        gb.mmu.get_byte(0xFF89),
+        gb.mmu.get_byte(0xFF8A),
         gb.mmu.get_byte(0xFF8B),
         gb.mmu.get_byte(0xFF8C),
+        gb.mmu.get_byte(0xFF8D),
         gb.mmu.get_byte(0xFF8E),
+        gb.mmu.get_byte(0xFF8F),
+        gb.mmu.get_byte(0xFF90),
         gb.mmu.get_byte(0xFF94),
         gb.mmu.get_byte(0xD03B),
         gb.mmu.get_byte(0xFF47),

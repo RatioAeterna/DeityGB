@@ -75,6 +75,7 @@ pub struct MMU {
     pub rom_data: Vec<u8>,
     pub div_internal: u16,
     tima_reload_delay: u8,
+    tima_reloaded_this_cycle: bool,
 
     cgb_mode: bool,
     force_dmg: bool,
@@ -92,6 +93,13 @@ pub struct MMU {
     hdma_destination: u16,
     hdma_blocks_remaining: u8,
     hdma_active: bool,
+    oam_dma_source: u16,
+    oam_dma_delay_cycles: u16,
+    oam_dma_cycles: u16,
+    oam_dma_index: u8,
+    oam_dma_active: bool,
+    oam_dma_pending_source: Option<u16>,
+    oam_dma_start_grace: bool,
 
     pub vram_banned: bool,
     pub oam_banned: bool,
@@ -172,6 +180,7 @@ impl MMU {
             rom_data: vec![],
             div_internal: 0,
             tima_reload_delay: 0,
+            tima_reloaded_this_cycle: false,
 
             cgb_mode: false,
             force_dmg: false,
@@ -189,6 +198,13 @@ impl MMU {
             hdma_destination: 0x8000,
             hdma_blocks_remaining: 0,
             hdma_active: false,
+            oam_dma_source: 0,
+            oam_dma_delay_cycles: 0,
+            oam_dma_cycles: 0,
+            oam_dma_index: 0,
+            oam_dma_active: false,
+            oam_dma_pending_source: None,
+            oam_dma_start_grace: false,
 
             vram_banned: false,
             oam_banned: false,
@@ -283,6 +299,65 @@ impl MMU {
 
     pub fn set_force_dmg(&mut self, force_dmg: bool) {
         self.force_dmg = force_dmg;
+    }
+
+    pub fn apply_dmg_family_post_boot_io(
+        &mut self,
+        div_internal: u16,
+        joyp: u8,
+        sb: u8,
+        sc: u8,
+        lcdc: u8,
+        stat: u8,
+        ly: u8,
+        dma: u8,
+        bgp: u8,
+        boot_disable: u8,
+    ) {
+        self.cgb_mode = false;
+        self.force_dmg = true;
+        self.double_speed = false;
+        self.speed_switch_armed = false;
+        self.div_internal = div_internal;
+        self.joypad_state = joyp;
+        self.memory[0xFF00] = joyp;
+        self.memory[0xFF01] = sb;
+        self.memory[0xFF02] = sc;
+        self.memory[0xFF05] = 0x00;
+        self.memory[0xFF06] = 0x00;
+        self.memory[0xFF07] = 0x00;
+        self.memory[0xFF0F] = 0xE1;
+        self.memory[0xFF10] = 0x00;
+        self.memory[0xFF11] = 0x80;
+        self.memory[0xFF12] = 0xF3;
+        self.memory[0xFF13] = 0x00;
+        self.memory[0xFF14] = 0x00;
+        self.memory[0xFF16] = 0x00;
+        self.memory[0xFF17] = 0x00;
+        self.memory[0xFF19] = 0x00;
+        self.memory[0xFF1A] = 0x00;
+        self.memory[0xFF1C] = 0x00;
+        self.memory[0xFF20] = 0x00;
+        self.memory[0xFF21] = 0x00;
+        self.memory[0xFF22] = 0x00;
+        self.memory[0xFF23] = 0x00;
+        self.memory[0xFF24] = 0x77;
+        self.memory[0xFF25] = 0xF3;
+        self.memory[0xFF26] = if joyp == 0xFF { 0x80 } else { 0x81 };
+        self.memory[0xFF40] = lcdc;
+        self.memory[0xFF41] = stat & 0x7F;
+        self.memory[0xFF42] = 0x00;
+        self.memory[0xFF43] = 0x00;
+        self.memory[0xFF44] = ly;
+        self.memory[0xFF45] = 0x00;
+        self.memory[0xFF46] = dma;
+        self.memory[0xFF47] = bgp;
+        self.memory[0xFF48] = 0xFF;
+        self.memory[0xFF49] = 0xFF;
+        self.memory[0xFF4A] = 0x00;
+        self.memory[0xFF4B] = 0x00;
+        self.memory[0xFF50] = boot_disable;
+        self.memory[0xFFFF] = 0x00;
     }
 
     pub fn double_speed(&self) -> bool {
@@ -463,6 +538,89 @@ impl MMU {
         if self.cgb_mode && self.hdma_active {
             self.transfer_hdma_block();
         }
+    }
+
+    fn read_oam_dma_source(&self, addr: usize) -> u8 {
+        if (0xE000..=0xFFFF).contains(&addr) {
+            return self.get_byte(addr - 0x2000);
+        }
+        if (0x8000..=0x9FFF).contains(&addr) {
+            let bank = if self.cgb_mode { self.vram_bank } else { 0 };
+            return self.read_vram_bank(bank, addr);
+        }
+        self.get_byte(addr)
+    }
+
+    fn start_oam_dma(&mut self, data: u8) {
+        self.memory[0xFF46] = data;
+        let source = u16::from(data) << 8;
+        self.oam_dma_delay_cycles = 8;
+        if self.oam_dma_active {
+            self.oam_dma_pending_source = Some(source);
+            self.oam_dma_start_grace = false;
+        } else {
+            self.oam_dma_source = source;
+            self.oam_dma_cycles = 0;
+            self.oam_dma_index = 0;
+            self.oam_dma_active = false;
+            self.oam_dma_pending_source = None;
+            self.oam_dma_start_grace = false;
+        }
+    }
+
+    pub fn tick_oam_dma(&mut self) {
+        if self.oam_dma_delay_cycles > 0 {
+            self.oam_dma_delay_cycles -= 1;
+            if self.oam_dma_delay_cycles == 0 {
+                if let Some(source) = self.oam_dma_pending_source.take() {
+                    self.oam_dma_source = source;
+                    self.oam_dma_cycles = 0;
+                    self.oam_dma_index = 0;
+                    self.oam_dma_start_grace = false;
+                } else if !self.oam_dma_active {
+                    self.oam_dma_start_grace = true;
+                }
+                self.oam_dma_active = true;
+                return;
+            }
+            if self.oam_dma_active {
+                self.step_oam_dma_transfer();
+            }
+            return;
+        }
+
+        if !self.oam_dma_active {
+            return;
+        }
+
+        self.step_oam_dma_transfer();
+    }
+
+    fn step_oam_dma_transfer(&mut self) {
+        self.oam_dma_cycles += 1;
+        if self.oam_dma_cycles % 4 != 0 {
+            return;
+        }
+
+        let index = self.oam_dma_index;
+        let source = self.oam_dma_source.wrapping_add(u16::from(index)) as usize;
+        let value = self.read_oam_dma_source(source);
+        self.set_oam(index, value);
+        self.oam_dma_index = self.oam_dma_index.wrapping_add(1);
+        if self.oam_dma_index >= 160 {
+            self.oam_dma_active = false;
+            self.oam_dma_start_grace = false;
+        }
+    }
+
+    pub fn get_opcode_byte(&mut self, addr: usize) -> u8 {
+        if self.oam_dma_start_grace {
+            self.oam_dma_start_grace = false;
+            if (0xFE00..=0xFE9F).contains(&addr) {
+                return self.memory[addr];
+            }
+        }
+        self.get_byte(addr)
     }
 
     pub fn apu_reg_set(&mut self, addr: usize, data: u8) {
@@ -1019,11 +1177,19 @@ impl MMU {
             }
         }
 
-        /*
         if addr == 0xFF45 {
-            println!("SETTING LYC! {}", data);
+            let old_stat = self.memory[0xFF41];
+            self.memory[addr] = data;
+            if self.memory[0xFF44] == data {
+                self.memory[0xFF41] |= 0x04;
+            } else {
+                self.memory[0xFF41] &= !0x04;
+            }
+            if old_stat & 0x04 == 0 && self.memory[0xFF41] & 0x44 == 0x44 {
+                self.memory[0xFF0F] |= 0x02;
+            }
+            return;
         }
-        */
 
         if addr == 0xFF01 {
             self.memory[addr] = data;
@@ -1039,8 +1205,30 @@ impl MMU {
                 self.serial_cycles_remaining = if self.cgb_mode && data & 0x02 != 0 {
                     128
                 } else {
-                    4096
+                    let div_phase = self.div_internal & 0x01FF;
+                    let cycles_to_next_falling_edge = if div_phase < 0x100 {
+                        0x200 - div_phase
+                    } else {
+                        0x400 - div_phase
+                    };
+                    cycles_to_next_falling_edge + 7 * 512 + 1
                 };
+            }
+            return;
+        }
+
+        if addr == 0xFF41 {
+            let old_stat = self.memory[addr];
+            let new_stat = (old_stat & 0x07) | (data & 0x78);
+            self.memory[addr] = new_stat;
+            let mode = new_stat & 0x03;
+            let newly_enabled_active_source =
+                (old_stat & 0x40 == 0 && new_stat & 0x44 == 0x44)
+                    || (mode == 0 && old_stat & 0x08 == 0 && new_stat & 0x08 != 0)
+                    || (mode == 1 && old_stat & 0x10 == 0 && new_stat & 0x10 != 0)
+                    || (mode == 2 && old_stat & 0x20 == 0 && new_stat & 0x20 != 0);
+            if newly_enabled_active_source {
+                self.memory[0xFF0F] |= 0x02;
             }
             return;
         }
@@ -1050,14 +1238,9 @@ impl MMU {
             return;
         }
 
-        // OAM DMA
-        // TODO this should take 160 M cycles.
         if (addr == 0xFF46) {
-            let source = (data as u16) << 8;
-            for i in 0..160 {
-                let obj_byte: u8 = self.get_byte((source + i) as usize);
-                self.set_oam(i as u8, obj_byte)
-            }
+            self.start_oam_dma(data);
+            return;
         }
 
         if addr == 0xFF00 {
@@ -1149,9 +1332,22 @@ impl MMU {
         }
 
         if addr == 0xFF05 {
-            // A TIMA write during the overflow's pending machine cycle
-            // cancels the scheduled reload and interrupt request.
-            self.tima_reload_delay = 0;
+            if self.tima_reloaded_this_cycle {
+                return;
+            }
+            if self.tima_reload_delay > 0 {
+                self.tima_reload_delay = 0;
+            }
+            self.memory[addr] = data;
+            return;
+        }
+
+        if addr == 0xFF06 {
+            self.memory[addr] = data;
+            if self.tima_reloaded_this_cycle {
+                self.memory[0xFF05] = data;
+            }
+            return;
         }
 
         // catch-all for writes to ROM (both valid and invalid)
@@ -1190,6 +1386,9 @@ impl MMU {
         if self.vram_banned && (addr >= 0x8000) && (addr <= 0x9FFF) {
             return;
         }
+        if self.oam_dma_active && (addr >= 0xFE00) && (addr <= 0xFE9F) {
+            return;
+        }
         if self.oam_banned && (addr >= 0xFE00) && (addr <= 0xFE9F) {
             return;
         }
@@ -1198,11 +1397,22 @@ impl MMU {
             // DIV write resets it
             // DIV-APU increment, if any
             let old_val = self.div_internal;
+            let old_tac = self.memory[0xFF07];
             let apu_bit = if self.double_speed { 13 } else { 12 };
             if old_val & (1 << apu_bit) != 0 {
                 self.div_apu_increment_flag = true;
             }
             self.div_internal = 0;
+            self.tick_tima_on_timer_falling_edge(old_tac, old_val, old_tac, self.div_internal);
+            self.memory[addr] = data;
+            return;
+        }
+
+        if addr == 0xFF07 {
+            let old_tac = self.memory[0xFF07];
+            self.tick_tima_on_timer_falling_edge(old_tac, self.div_internal, data, self.div_internal);
+            self.memory[addr] = data;
+            return;
         }
         //handle_bank_switch(addr, data);
         self.memory[addr] = data;
@@ -1232,7 +1442,28 @@ impl MMU {
         }
     }
 
+    fn timer_selected_bit(tac: u8) -> u8 {
+        match tac & 0b11 {
+            0 => 9,
+            1 => 3,
+            2 => 5,
+            3 => 7,
+            _ => 9,
+        }
+    }
+
+    fn timer_signal(&self, tac: u8, div: u16) -> bool {
+        tac & 0b100 != 0 && ((div >> Self::timer_selected_bit(tac)) & 1) != 0
+    }
+
+    fn tick_tima_on_timer_falling_edge(&mut self, old_tac: u8, old_div: u16, new_tac: u8, new_div: u16) {
+        if self.timer_signal(old_tac, old_div) && !self.timer_signal(new_tac, new_div) {
+            self.increment_tima();
+        }
+    }
+
     pub fn tick_tima_reload(&mut self) {
+        self.tima_reloaded_this_cycle = false;
         if self.tima_reload_delay == 0 {
             return;
         }
@@ -1240,6 +1471,7 @@ impl MMU {
         if self.tima_reload_delay == 0 {
             self.memory[0xFF05] = self.memory[0xFF06];
             self.memory[0xFF0F] |= 0x04;
+            self.tima_reloaded_this_cycle = true;
         }
     }
 
@@ -1403,6 +1635,17 @@ impl MMU {
             return self.apu_reg_get(addr);
         }
 
+        match addr {
+            0xFF03 | 0xFF08..=0xFF0E | 0xFF15 | 0xFF1F | 0xFF27..=0xFF2F => {
+                return 0xFF
+            }
+            _ => {}
+        }
+
+        if !self.cgb_mode && (0xFF4C..=0xFF7F).contains(&addr) {
+            return 0xFF;
+        }
+
         if self.cgb_mode {
             match addr {
                 0xFF4D => {
@@ -1484,8 +1727,24 @@ impl MMU {
             return self.memory[addr];
         }
 
+        if addr == 0xFF02 {
+            return if self.cgb_mode {
+                (self.memory[addr] & 0x83) | 0x7C
+            } else {
+                (self.memory[addr] & 0x81) | 0x7E
+            };
+        }
+
         if addr == 0xFF0F {
             return self.memory[addr] | 0xE0;
+        }
+
+        if addr == 0xFF07 {
+            return self.memory[addr] | 0xF8;
+        }
+
+        if addr == 0xFF41 {
+            return self.memory[addr] | 0x80;
         }
 
         if (0x8000..=0x9FFF).contains(&addr) {
@@ -1511,6 +1770,10 @@ impl MMU {
         if self.vram_banned && (addr >= 0x8000) && (addr <= 0x9FFF) {
             return 0xFF;
         }
+        if self.oam_dma_active && (addr >= 0xFE00) && (addr <= 0xFE9F) {
+            return 0xFF;
+        }
+
         if self.oam_banned && (addr >= 0xFE00) && (addr <= 0xFE9F) {
             return 0xFF;
         }

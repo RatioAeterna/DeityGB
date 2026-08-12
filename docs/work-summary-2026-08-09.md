@@ -1119,3 +1119,130 @@ machines, is a proper wall-clock cycle accumulator with audio-buffer feedback.
 That would be a larger synchronization change. This checkpoint fixes the
 obvious double-throttle first so Pokemon Crystal/Silver should run much closer
 to the host's 60 Hz presentation rate.
+
+## Mooneye Acceptance Baseline
+
+Mooneye uses a compact pass/fail protocol rather than Blargg's text protocol.
+A passing test places `03 05 08 0D 15 22` in `BCDEHL`; a failing test places
+`42` in all six registers. The ROMs then report through serial. DeityGB's
+current serial behavior causes many Mooneye ROMs to take their fast
+serial-broken path, so the observable serial log may contain only the final
+byte written to `SB` rather than all six bytes. The headless runner now treats
+the register tuple as authoritative once serial reporting has started.
+
+The command-line diagnostics now include `BC` alongside `DE` and `HL`, making
+Mooneye reports readable without enabling a full CPU trace. The ignored DAA
+smoke test has been replaced by two acceptance regressions: one explicit list
+of currently passing ROMs, and one full-tree classifier that asserts the suite
+does not produce ambiguous timeouts.
+
+Current release baseline for
+`src/roms/mts-20240926-1737-443f6e1/acceptance`, using a 10-second emulated
+budget and APU disabled:
+
+- Passed: 53.
+- Failed: 22.
+- Timeout: 0.
+
+Passing families now include `instr/daa`, `if_ie_registers`, DI/EI sequencing,
+all bundled HALT acceptance ROMs, `intr_timing`, `reti_intr_timing`, the
+`interrupts/ie_push` interrupt-dispatch edge case, JP/CALL/RET/RST/PUSH/POP
+timing, `add_sp_e_timing`, `ld_hl_sp_e_timing`, DMG-family unused HWIO bus
+masks, all current OAM DMA acceptance coverage, DIV/TAC falling-edge timer
+behavior, TIMA reload/write windows, and the basic `tim00`, `tim01`, `tim10`,
+and `tim11` timer rates.
+
+The unused-HWIO pass comes from modeling normal DMG-family bus reads for
+otherwise-unused register bits and addresses. `SC` now reports bits 1-6 high,
+`TAC` reports bits 3-7 high, `STAT` reports bit 7 high, the usual unused APU
+register gaps still read as `FF`, and the DMG-family `$FF4C-$FF7F` range reads
+as unmapped even though DeityGB internally keeps a boot-disable sentinel for
+`FF50`.
+
+The OAM DMA implementation is now timed instead of immediate. A write to `DMA`
+creates the hardware-visible startup delay, blocks CPU OAM reads and writes
+while transfer is active, copies one byte per machine cycle, preserves the old
+transfer during restart delay, and handles source pages through the same memory
+ownership boundaries as ordinary reads. The CPU fetch path also exposes the
+initial OAM opcode grace needed by Mooneye's DMA-start probes.
+
+Instruction timing fixes made operand and stack accesses happen at the cycles
+the acceptance ROMs observe rather than as lumped instruction effects.
+JP/CALL conditional forms fetch their 16-bit target before deciding whether the
+branch is taken, CALL and RST push high then low return bytes at their observed
+cycles, and RET/POP read low then high with the taken conditional RET offset.
+
+Timer work taught DIV and TAC writes to detect selected-bit falling edges, and
+taught TIMA/TMA writes about the reload-cycle windows. That is why the
+DIV-trigger and reload-write Mooneye timer cases are now part of the protected
+pass set.
+
+DI disables IME immediately and cancels pending EI, while EI still takes effect
+only after the following instruction. Interrupt service now models the observed
+`ie_push` behavior: the high PC byte is pushed first, IE/IF are sampled again,
+and if that write removed the last pending interrupt the CPU vectors to
+`0000` without clearing IF or pushing the low byte.
+
+The remaining failures are real emulator accuracy gaps, not harness ambiguity.
+They cluster around boot-revision register/DIV/HWIO expectations, PPU
+STAT/LY/LCD-enable timing, and serial boot clock alignment. The boot-revision
+group is partly a harness/model-selection issue: a single fixed startup profile
+cannot truthfully satisfy every DMG0, DMG-ABC, MGB, SGB, and SGB2 expectation at
+the same time. The PPU group is the next large accuracy frontier after the
+CPU/timer/DMA/HWIO acceptance gains.
+
+### Mooneye 66/75 Follow-Up
+
+The headless runner now has an explicit `--model` post-boot path for
+DMG0, DMG-ABC, MGB, SGB, and SGB2 acceptance ROMs. These profiles bypass the
+bundled DMG boot ROM and install the hardware-family CPU registers plus the
+documented post-boot IO state that Mooneye's model-specific ROMs assert. This
+is deliberately scoped to the headless harness: the frontend still uses the
+normal boot-ROM flow unless the user chooses otherwise, and the profiles do not
+try to masquerade as cartridge save state or global emulator defaults.
+
+That model split moved the acceptance baseline from 53/75 to 63/75 by making
+the boot register, boot DIV, SGB boot DIV2, and DMG-family boot HWIO cases run
+under the hardware family they were written to observe. The first additional
+PPU/MMU timing pass raised the protected baseline to 64/75 with
+`ppu/stat_irq_blocking.gb`: STAT interrupts are no longer requested directly on
+every enabled mode transition. Instead, the PPU keeps the hardware-style ORed
+STAT IRQ line and requests IF bit 1 only on a low-to-high transition. CPU writes
+to `STAT` and `LYC` also preserve PPU-owned low bits, update coincidence state,
+and request an interrupt only when a newly enabled source is already active.
+
+The protected baseline is now 66/75. One new pass is `boot_hwio-dmg0.gb`.
+DMG0's skipped-boot profile now seeds the internal PPU phase as late VBlank
+(`LY=145`, mode 1, dot 100) while preserving the visible post-boot IO register
+profile. That lets the test ROM's hardware-IO scan naturally wrap into the
+expected `STAT`/`LY` values without running a copyrighted DMG0 boot ROM. This
+seed is deliberately DMG0-only; the DMG-ABC/MGB/SGB/SGB2 boot HWIO profiles keep
+the previous cold-PPU behavior because that already matches their acceptance
+ROMs.
+
+The second new pass is `serial/boot_sclk_align-dmgABCmgb.gb`. Internal-clock
+serial transfers now complete one CPU tick after the scheduled final falling
+edge. That keeps the transfer byte visible for the DMG-ABC boot-clock alignment
+test's sampling point and updates the focused serial unit test to assert the
+new boundary.
+
+The remaining 9 failures are:
+
+- `ppu/hblank_ly_scx_timing-GS.gb`
+- `ppu/intr_2_mode0_timing.gb`
+- `ppu/intr_2_mode0_timing_sprites.gb`
+- `ppu/intr_2_mode3_timing.gb`
+- `ppu/intr_2_oam_ok_timing.gb`
+- `ppu/lcdon_timing-GS.gb`
+- `ppu/lcdon_write_timing-GS.gb`
+- `ppu/stat_lyc_onoff.gb`
+- `ppu/vblank_stat_intr-GS.gb`
+
+The failed PPU ROMs are not generic rendering problems; they probe exact
+scanline-cycle ownership of LY, STAT mode bits, LYC coincidence, LCD enable
+startup, OAM/VRAM access windows, and interrupt sampling. The next meaningful
+step toward 75/75 is a cycle-stepped PPU/CPU boundary that can expose those
+state changes at the same sub-instruction points the CPU observes. A naive
+per-cycle PPU loop was tried and rejected because it slowed the suite
+substantially without increasing the pass count; the next version needs to
+advance only to scheduled PPU edges and timed memory accesses.

@@ -55,14 +55,17 @@ battle transitions that do not produce an emulated VBlank.
 
 ```sh
 nix develop --command cargo run --bin gb-headless -- src/roms/gb-test-roms/cpu_instrs/individual/01-special.gb --seconds 30
-nix develop --command cargo run --bin gb-headless -- src/roms/mts-20240926-1737-443f6e1/acceptance/instr/daa.gb --seconds 30
+nix develop --command cargo run --release --bin gb-headless -- src/roms/mts-20240926-1737-443f6e1/acceptance/instr/daa.gb --seconds 10 --no-apu
 ```
 
 The headless runner reports `Passed`, `Failed`, or `Timeout` by watching serial
 output and Blargg's documented cartridge-RAM protocol at `A000-A004`. The
 runner prints the memory status and escaped diagnostic text when that protocol
 is present. Mooneye ROMs use their documented serial/register protocol: passing
-tests send `3, 5, 8, 13, 21, 34`; failing tests send `0x42` six times.
+tests report `3, 5, 8, 13, 21, 34` in `BCDEHL`; failing tests report `0x42`
+in all six registers. The ROMs may use their fast serial-broken path and leave
+only the final byte visible in `SB`, so the headless runner recognizes the
+register tuple after serial reporting starts.
 
 ## Visual Snapshots
 
@@ -156,6 +159,25 @@ nix develop --command cargo test --test headless -- --ignored --test-threads=1
 
 They are ignored by default because the current emulator may expose accuracy
 gaps while CPU, timer, PPU, and APU work is still in progress.
+
+Mooneye acceptance coverage has two focused ignored regressions:
+
+```sh
+nix develop --command cargo test --release --test headless \
+  mooneye_acceptance_known_passes_remain_green -- --ignored --exact
+nix develop --command cargo test --release --test headless \
+  mooneye_acceptance_suite_reports_no_timeouts -- --ignored --exact
+```
+
+The current baseline over `src/roms/mts-20240926-1737-443f6e1/acceptance` is
+66 passed, 9 failed, 0 timed out with a 10-second budget and APU disabled.
+Passing coverage includes DAA, IF/IE, DI/EI sequencing, HALT timing, interrupt
+dispatch edge cases, JP/CALL/RET/RST/PUSH/POP timing, ADD SP/e and
+LD HL/SP+e timing, DMG-family unused HWIO bus masks, model-specific
+DMG0/DMG-ABC/MGB/SGB/SGB2 post-boot register, DIV, and HWIO profiles, OAM DMA
+start/restart/source/read behavior, DIV/TAC falling edges, TIMA reload/write
+windows, STAT IRQ blocking, DMG-ABC serial boot-clock alignment, and all basic
+TIMA rates. Known failures now cluster around PPU STAT/LY/LCD enable timing.
 
 Run the passing DMG/CGB APU core set directly with:
 
