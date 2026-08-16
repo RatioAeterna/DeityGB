@@ -1,0 +1,53 @@
+[package]
+name = "DeityGB"
+version = "0.1.0"
+authors = ["jason"]
+edition = "2018"
+default-run = "DeityGB"
+description = "A Game Boy and Game Boy Color emulator"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+# Keeping here for future reference in case it's needed
+
+[patch.crates-io]
+miniquad = { path = "vendor/miniquad" }
+
+[dependencies]
+macroquad = "=0.4.13"
+csv = "1.3.1"
+cpal = { version = "0.16", optional = true }
+image = { version = "0.24.9", default-features = false, features = ["png"] }
+
+[features]
+default = ["host-audio"]
+host-audio = ["dep:cpal"]
+
+[target.'cfg(not(any(target_os = "macos", target_os = "linux")))'.dependencies]
+rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc = "0.2.7"
+
+[lib]
+name = "deitygb"
+path = "src/lib.rs"
+
+[[bin]]
+name = "DeityGB"
+path = "src/main.rs"
+
+[[bin]]
+name = "gb-headless"
+path = "src/bin/gb-headless.rs"
+
+[package.metadata.bundle]
+name = "DeityGB"
+identifier = "com.jasoncox.deitygb"
+icon = ["assets/deitygb-icon-512.png"]
+category = "public.app-category.games"
+short_description = "Game Boy and Game Boy Color emulator"
+long_description = "DeityGB is a desktop Game Boy and Game Boy Color emulator with an in-app ROM library and cartridge save support."
+linux_use_terminal = false
+linux_exec_args = "%f"
+osx_minimum_system_version = "11.0"
