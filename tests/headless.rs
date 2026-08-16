@@ -31,6 +31,140 @@ fn cgb_test_rom() -> Vec<u8> {
     rom
 }
 
+#[test]
+fn dmg_mode2_stat_source_pulses_when_vblank_starts() {
+    let mut mmu = MMU::new();
+    let mut ppu = PPU::new();
+    mmu.set_raw_byte(0xFF40, 0x80);
+    mmu.set_raw_byte(0xFF45, 0x00);
+    mmu.set_if(0);
+    ppu.apply_dmg_family_post_boot_state(
+        0x20,
+        143,
+        Some(0),
+        Some(452),
+        Some(143),
+        &mut mmu,
+    );
+    mmu.set_raw_byte(0xFF41, 0x20);
+
+    ppu.cycle(4, &mut mmu);
+
+    assert_eq!(mmu.get_raw_byte(0xFF44), 144);
+    assert_eq!(mmu.get_raw_byte(0xFF41) & 0x03, 1);
+    assert_ne!(mmu.get_if() & 0x02, 0);
+}
+
+#[test]
+fn active_stat_source_blocks_dmg_line_144_mode2_pulse() {
+    let mut mmu = MMU::new();
+    let mut ppu = PPU::new();
+    mmu.set_raw_byte(0xFF40, 0x80);
+    mmu.set_raw_byte(0xFF41, 0x28);
+    mmu.set_raw_byte(0xFF45, 0x00);
+    ppu.apply_dmg_family_post_boot_state(
+        0x28,
+        143,
+        Some(0),
+        Some(452),
+        Some(143),
+        &mut mmu,
+    );
+    mmu.set_if(0);
+
+    ppu.cycle(4, &mut mmu);
+
+    assert_eq!(mmu.get_if() & 0x02, 0);
+    assert_ne!(mmu.get_if() & 0x01, 0);
+}
+
+#[test]
+fn cgb_does_not_generate_dmg_line_144_mode2_pulse() {
+    let mut mmu = MMU::new();
+    let mut ppu = PPU::new();
+    mmu.load_rom(&cgb_test_rom());
+    mmu.set_raw_byte(0xFF40, 0x80);
+    mmu.set_raw_byte(0xFF41, 0x20);
+    mmu.set_raw_byte(0xFF45, 0x00);
+    ppu.apply_dmg_family_post_boot_state(
+        0x20,
+        143,
+        Some(0),
+        Some(452),
+        Some(143),
+        &mut mmu,
+    );
+    mmu.set_if(0);
+
+    ppu.cycle(4, &mut mmu);
+
+    assert_eq!(mmu.get_if() & 0x02, 0);
+    assert_ne!(mmu.get_if() & 0x01, 0);
+}
+
+#[test]
+fn normal_scanline_ly_advances_at_dot_444() {
+    let mut mmu = MMU::new();
+    let mut ppu = PPU::new();
+    mmu.set_raw_byte(0xFF40, 0x80);
+    mmu.set_raw_byte(0xFF45, 10);
+    ppu.apply_dmg_family_post_boot_state(0x04, 10, Some(0), Some(440), Some(10), &mut mmu);
+
+    assert_eq!(mmu.get_byte(0xFF44), 10);
+    assert_ne!(mmu.get_byte(0xFF41) & 0x04, 0);
+    ppu.cycle(4, &mut mmu);
+
+    assert_eq!(mmu.get_byte(0xFF44), 11);
+    assert_eq!(mmu.get_byte(0xFF41) & 0x03, 0);
+    assert_eq!(mmu.get_byte(0xFF41) & 0x04, 0);
+}
+
+#[test]
+fn dmg_lcd_enable_startup_ly_advances_at_dot_452() {
+    let mut mmu = MMU::new();
+    let mut ppu = PPU::new();
+    mmu.set_raw_byte(0xFF40, 0x00);
+    ppu.cycle(4, &mut mmu);
+    mmu.set_raw_byte(0xFF40, 0x80);
+
+    for _ in 0..112 {
+        ppu.cycle(4, &mut mmu);
+    }
+    assert_eq!(mmu.get_byte(0xFF44), 0);
+
+    ppu.cycle(4, &mut mmu);
+    assert_eq!(mmu.get_byte(0xFF44), 1);
+}
+
+#[test]
+fn mode2_locks_vram_at_dot_76() {
+    let mut mmu = MMU::new();
+    mmu.set_raw_byte(0xFF40, 0x80);
+    mmu.set_raw_byte(0x8000, 0x5A);
+
+    mmu.set_ppu_state(2, 75);
+    assert_eq!(mmu.get_byte(0x8000), 0x5A);
+    mmu.set_ppu_state(2, 76);
+    assert_eq!(mmu.get_byte(0x8000), 0xFF);
+}
+
+#[test]
+fn mode2_oam_write_aperture_is_only_dot_76() {
+    let mut mmu = MMU::new();
+    mmu.set_raw_byte(0xFF40, 0x80);
+    mmu.set_raw_byte(0xFE00, 0x11);
+
+    mmu.set_ppu_state(2, 75);
+    mmu.set_byte(0xFE00, 0x22);
+    assert_eq!(mmu.get_raw_byte(0xFE00), 0x11);
+    mmu.set_ppu_state(2, 76);
+    mmu.set_byte(0xFE00, 0x33);
+    assert_eq!(mmu.get_raw_byte(0xFE00), 0x33);
+    mmu.set_ppu_state(2, 77);
+    mmu.set_byte(0xFE00, 0x44);
+    assert_eq!(mmu.get_raw_byte(0xFE00), 0x33);
+}
+
 fn temp_rom_path(name: &str) -> PathBuf {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -916,10 +1050,15 @@ fn mooneye_acceptance_known_passes_remain_green() {
         "ppu/intr_1_2_timing-GS.gb",
         "ppu/intr_2_0_timing.gb",
         "ppu/intr_2_mode0_timing.gb",
+        "ppu/intr_2_mode0_timing_sprites.gb",
         "ppu/intr_2_mode3_timing.gb",
         "ppu/intr_2_oam_ok_timing.gb",
         "ppu/stat_irq_blocking.gb",
         "ppu/stat_lyc_onoff.gb",
+        "ppu/hblank_ly_scx_timing-GS.gb",
+        "ppu/lcdon_timing-GS.gb",
+        "ppu/lcdon_write_timing-GS.gb",
+        "ppu/vblank_stat_intr-GS.gb",
         "push_timing.gb",
         "rapid_di_ei.gb",
         "ret_cc_timing.gb",
@@ -1019,8 +1158,8 @@ fn mooneye_acceptance_suite_reports_no_timeouts() {
         "Mooneye acceptance timeouts: {:?}",
         timed_out
     );
-    assert_eq!(passed.len(), 70, "passed cases changed: {:?}", passed);
-    assert_eq!(failed.len(), 5, "failed cases changed: {:?}", failed);
+    assert_eq!(passed.len(), 75, "passed cases changed: {:?}", passed);
+    assert_eq!(failed.len(), 0, "failed cases changed: {:?}", failed);
 }
 
 #[test]

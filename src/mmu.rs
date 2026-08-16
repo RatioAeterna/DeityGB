@@ -105,6 +105,7 @@ pub struct MMU {
     pub oam_banned: bool,
     ppu_mode: u8,
     ppu_mode_cycles: u16,
+    ppu_oam_early_ban: bool,
 
     pub joypad_state: u8,
     joypad_buttons: u8,
@@ -210,6 +211,7 @@ impl MMU {
             oam_banned: false,
             ppu_mode: 0,
             ppu_mode_cycles: 0,
+            ppu_oam_early_ban: false,
             joypad_state: 0xCF,
             joypad_buttons: 0x0F,
             joypad_dpad: 0x0F,
@@ -594,6 +596,10 @@ impl MMU {
         }
 
         self.step_oam_dma_transfer();
+    }
+
+    pub fn oam_dma_active(&self) -> bool {
+        self.oam_dma_active
     }
 
     fn step_oam_dma_transfer(&mut self) {
@@ -1391,7 +1397,12 @@ impl MMU {
         if self.oam_dma_active && (addr >= 0xFE00) && (addr <= 0xFE9F) {
             return;
         }
-        if self.observable_oam_banned() && (addr >= 0xFE00) && (addr <= 0xFE9F) {
+        let oam_write_banned = self.observable_ppu_mode() == 3
+            || (self.observable_ppu_mode() == 2 && self.ppu_mode_cycles != 76);
+        if oam_write_banned
+            && (addr >= 0xFE00)
+            && (addr <= 0xFE9F)
+        {
             return;
         }
 
@@ -1522,26 +1533,24 @@ impl MMU {
         self.ppu_mode_cycles = mode_cycles;
     }
 
+    pub fn set_ppu_oam_early_ban(&mut self, banned: bool) {
+        self.ppu_oam_early_ban = banned;
+    }
+
     fn observable_ppu_mode(&self) -> u8 {
         if self.memory[0xFF40] & 0x80 == 0 {
             return 0;
         }
-        match self.ppu_mode {
-            // Mooneye's CPU-observed STAT/access timing sees the mode 2->3
-            // and mode 3->0 bus boundaries one machine cycle before DeityGB's
-            // coarse internal transition/IRQ point.
-            2 if self.ppu_mode_cycles >= 76 => 3,
-            3 if self.ppu_mode_cycles >= 248 => 0,
-            mode => mode,
-        }
+        self.ppu_mode
     }
 
     fn observable_vram_banned(&self) -> bool {
         self.observable_ppu_mode() == 3
+            || (self.ppu_mode == 2 && self.ppu_mode_cycles >= 76)
     }
 
     fn observable_oam_banned(&self) -> bool {
-        matches!(self.observable_ppu_mode(), 2 | 3)
+        self.ppu_oam_early_ban || matches!(self.observable_ppu_mode(), 2 | 3)
     }
 
     pub fn trigger_oam_idu_corruption(&mut self, address: u16) {

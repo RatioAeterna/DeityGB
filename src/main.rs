@@ -271,12 +271,11 @@ async fn main() {
         // for the PPU to render a single scanline (one line of pixels).
         // After accumulating 456 cycles, we render a single line with the PPU.
         // Once 144 lines are rendered, we enter VBlank, where we can safely copy the screen buffer to display it.
-        let cycles = cpu.cycle(&mut mmu);
+        let cycles = cpu.cycle_with_ppu(&mut mmu, &mut ppu);
         let peripheral_cycles = mmu.peripheral_cycles(cycles);
         mmu.tick_rtc(u64::from(peripheral_cycles));
         accumulated_cycles = accumulated_cycles.saturating_add(peripheral_cycles as u32);
         //println!("CYCLES: {}, rendered_yet: {}", cycles, rendered_yet);
-        ppu.cycle(peripheral_cycles, &mut mmu);
         if apu_enabled {
             apu.cycle(peripheral_cycles, &mut mmu);
         }

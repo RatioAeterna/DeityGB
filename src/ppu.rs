@@ -54,6 +54,8 @@ pub struct PPU {
     window_line_counter : u8,
     lcd_enabled: bool,
     lcd_startup_line: bool,
+    lcd_startup_followup_line: bool,
+    startup_transfer_started: bool,
     startup_ly_advanced: bool,
     stat_irq_line: bool,
 }
@@ -84,6 +86,8 @@ impl PPU {
             window_line_counter : 0,
             lcd_enabled: false,
             lcd_startup_line: false,
+            lcd_startup_followup_line: false,
+            startup_transfer_started: false,
             startup_ly_advanced: false,
             stat_irq_line: false,
         }
@@ -116,8 +120,11 @@ impl PPU {
         }
         self.window_line_counter = 0;
         self.lcd_startup_line = false;
+        self.lcd_startup_followup_line = false;
+        self.startup_transfer_started = false;
         self.startup_ly_advanced = false;
         self.stat_irq_line = false;
+        mmu_ref.set_ppu_oam_early_ban(false);
         mmu_ref.set_raw_byte(0xFF44, ppu_ly.unwrap_or(ly));
         self.toggle_stat_mode(stat & 0x03, mmu_ref);
         self.check_ly_eq_lyc(mmu_ref);
@@ -150,7 +157,7 @@ impl PPU {
     }
 
     pub fn get_ly(&mut self, mmu_ref : &mut mmu::MMU) -> u8 {
-        mmu_ref.get_byte(0xFF44 as usize)
+        mmu_ref.get_raw_byte(0xFF44 as usize)
     }
 
     pub fn get_lyc(&mut self, mmu_ref : &mut mmu::MMU) -> u8 {
@@ -438,7 +445,15 @@ impl PPU {
     }
 
     fn update_stat_irq_line(&mut self, mmu_ref: &mut mmu::MMU) {
-        let new_line = self.stat_irq_condition(mmu_ref);
+        self.update_stat_irq_line_with_source(false, mmu_ref);
+    }
+
+    fn update_stat_irq_line_with_source(
+        &mut self,
+        transient_source: bool,
+        mmu_ref: &mut mmu::MMU,
+    ) {
+        let new_line = self.stat_irq_condition(mmu_ref) || transient_source;
         if new_line && !self.stat_irq_line {
             let mut if_reg = mmu_ref.get_if();
             if_reg |= 0b10;
@@ -460,7 +475,48 @@ impl PPU {
     }
 
     fn mode3_cycles(&mut self, mmu_ref: &mut mmu::MMU) -> u16 {
-        172 + u16::from(self.get_scx(mmu_ref) & 0x07)
+        let scx = self.get_scx(mmu_ref) & 0x07;
+        let base_cycles = 172 + u16::from(scx);
+        if self.get_lcdc(mmu_ref) & 0x02 == 0 {
+            return base_cycles;
+        }
+        let base_cycles = base_cycles - 8;
+
+        let sprite_height = if self.get_lcdc(mmu_ref) & 0x04 != 0 { 16 } else { 8 };
+        let ly = i16::from(self.get_ly(mmu_ref));
+        let mut sprites: Vec<(usize, u8)> = self
+            .sprites
+            .iter()
+            .enumerate()
+            .filter(|(_, sprite)| {
+                let top = i16::from(sprite.y) - 16;
+                ly >= top && ly < top + sprite_height
+            })
+            .take(10)
+            .map(|(index, sprite)| (index, sprite.x))
+            .collect();
+
+        if !mmu_ref.cgb_mode() {
+            sprites.sort_by_key(|(index, x)| (*x, *index));
+        }
+
+        let mut considered_tiles = Vec::new();
+        let mut sprite_penalty = 0u16;
+        for (_, x) in sprites {
+            if x >= 168 {
+                continue;
+            }
+            sprite_penalty += 6;
+            let scrolled_x = u16::from(x) + u16::from(scx);
+            let tile = scrolled_x / 8;
+            if !considered_tiles.contains(&tile) {
+                considered_tiles.push(tile);
+                let pixels_right = 7 - (scrolled_x & 0x07);
+                sprite_penalty += pixels_right.saturating_sub(2);
+            }
+        }
+        let quantized_penalty = sprite_penalty & !0x03;
+        base_cycles + quantized_penalty
     }
 
     pub fn cycle(&mut self, t_cycles: u8, mmu_ref : &mut mmu::MMU) {
@@ -471,7 +527,10 @@ impl PPU {
             self.window_line_counter = 0;
             self.lcd_enabled = false;
             self.lcd_startup_line = false;
+            self.lcd_startup_followup_line = false;
+            self.startup_transfer_started = false;
             self.startup_ly_advanced = false;
+            mmu_ref.set_ppu_oam_early_ban(false);
             mmu_ref.set_raw_byte(0xFF44, 0);
             let stat = mmu_ref.get_byte(0xFF41) & 0xFC;
             mmu_ref.set_raw_byte(0xFF41, stat);
@@ -485,7 +544,10 @@ impl PPU {
             self.window_line_counter = 0;
             self.lcd_enabled = true;
             self.lcd_startup_line = !mmu_ref.cgb_mode();
+            self.lcd_startup_followup_line = false;
+            self.startup_transfer_started = false;
             self.startup_ly_advanced = false;
+            mmu_ref.set_ppu_oam_early_ban(false);
             mmu_ref.set_raw_byte(0xFF44, 0);
             self.toggle_stat_mode(0, mmu_ref);
             self.check_ly_eq_lyc(mmu_ref);
@@ -501,17 +563,31 @@ impl PPU {
         };
         mmu_ref.set_ppu_state(hardware_mode, self.accumulated_cycles);
 
-        if self.lcd_startup_line
+        if matches!(self.mode, HBlank)
             && !self.startup_ly_advanced
-            && self.accumulated_cycles >= 452
+            && self.accumulated_cycles
+                >= if self.lcd_startup_line || self.lcd_startup_followup_line {
+                    452
+                } else {
+                    444
+                }
         {
             self.inc_ly(mmu_ref);
+            self.toggle_stat(2, false, mmu_ref);
+            mmu_ref.set_ppu_oam_early_ban(true);
             self.startup_ly_advanced = true;
         }
 
         let ly = self.get_ly(mmu_ref);
         //println!("ACCUMULATED CYCLES: {}, ly: {}, mode: {:?}", self.accumulated_cycles, ly, self.mode);
-        self.check_ly_eq_lyc(mmu_ref);
+        // LY changes before the next mode boundary (at a different phase on
+        // LCD-startup lines), while coincidence is latched at the boundary.
+        if !(matches!(self.mode, HBlank)
+            && self.startup_ly_advanced
+            && self.accumulated_cycles < 456)
+        {
+            self.check_ly_eq_lyc(mmu_ref);
+        }
         
         // figure out which MODE we are in
         match self.mode {
@@ -546,7 +622,15 @@ impl PPU {
                 }
             }
             Transfer => {
-                if self.accumulated_cycles >= 80 + self.mode3_cycles(mmu_ref) {
+                let transfer_end = 80 + self.mode3_cycles(mmu_ref);
+                if self.accumulated_cycles >= transfer_end.saturating_sub(4)
+                    && self.accumulated_cycles < transfer_end
+                    && mmu_ref.get_raw_byte(0xFF41) & 0x08 != 0
+                {
+                    self.update_stat_irq_line_with_source(true, mmu_ref);
+                    return;
+                }
+                if self.accumulated_cycles >= transfer_end {
                     self.mode = HBlank;
                     self.toggle_stat_mode(0, mmu_ref);
                     self.update_stat_irq_line(mmu_ref);
@@ -564,12 +648,29 @@ impl PPU {
                 }
             }
             HBlank => {
+                if self.lcd_startup_line
+                    && !self.startup_transfer_started
+                    && self.accumulated_cycles >= 80
+                {
+                    self.startup_transfer_started = true;
+                    self.mode = Transfer;
+                    self.toggle_stat_mode(3, mmu_ref);
+                    self.update_stat_irq_line(mmu_ref);
+                    return;
+                }
                 if self.accumulated_cycles >= 456 {
+                    mmu_ref.set_ppu_oam_early_ban(false);
                     if self.startup_ly_advanced {
-                        self.lcd_startup_line = false;
                         self.startup_ly_advanced = false;
                     } else {
                         self.inc_ly(mmu_ref);
+                    }
+                    if self.lcd_startup_line {
+                        self.lcd_startup_line = false;
+                        self.lcd_startup_followup_line = true;
+                        self.startup_transfer_started = false;
+                    } else if self.lcd_startup_followup_line {
+                        self.lcd_startup_followup_line = false;
                     }
                     //self.check_ly_eq_lyc(mmu_ref);
                     // TODO we should probably subtract instead of just set to zero. In the other
@@ -580,7 +681,9 @@ impl PPU {
                     if self.get_ly(mmu_ref) == 144 {
                         self.mode = VBlank;
                         self.toggle_stat_mode(1, mmu_ref);
-                        self.update_stat_irq_line(mmu_ref);
+                        let mode2_vblank_pulse = !mmu_ref.cgb_mode()
+                            && mmu_ref.get_raw_byte(0xFF41) & 0x20 != 0;
+                        self.update_stat_irq_line_with_source(mode2_vblank_pulse, mmu_ref);
 
                         // fire VBlank interrupt
                         let interrupt_flag = mmu_ref.get_byte(0xFF0F);
@@ -597,6 +700,14 @@ impl PPU {
                 }
             }
             VBlank => {
+                if self.get_ly(mmu_ref) == 153
+                    && self.accumulated_cycles >= 452
+                    && self.accumulated_cycles < 456
+                    && mmu_ref.get_raw_byte(0xFF41) & 0x20 != 0
+                {
+                    self.update_stat_irq_line_with_source(true, mmu_ref);
+                    return;
+                }
                 if self.accumulated_cycles >= 456 {
                     self.inc_ly(mmu_ref);
                     //self.check_ly_eq_lyc(mmu_ref);

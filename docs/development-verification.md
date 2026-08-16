@@ -170,15 +170,40 @@ nix develop --command cargo test --release --test headless \
 ```
 
 The current baseline over `src/roms/mts-20240926-1737-443f6e1/acceptance` is
-70 passed, 5 failed, 0 timed out with a 10-second budget and APU disabled.
+75 passed, 0 failed, 0 timed out with a 10-second budget and APU disabled.
 Passing coverage includes DAA, IF/IE, DI/EI sequencing, HALT timing, interrupt
 dispatch edge cases, JP/CALL/RET/RST/PUSH/POP timing, ADD SP/e and
 LD HL/SP+e timing, DMG-family unused HWIO bus masks, model-specific
 DMG0/DMG-ABC/MGB/SGB/SGB2 post-boot register, DIV, and HWIO profiles, OAM DMA
 start/restart/source/read behavior, DIV/TAC falling edges, TIMA reload/write
-windows, STAT IRQ blocking, CPU-visible PPU mode/access boundary timing, LCD-off LYC coincidence behavior, DMG-ABC serial
-boot-clock alignment, and all basic TIMA rates. Known failures now cluster
-around PPU STAT/LY/LCD enable timing.
+windows, STAT IRQ blocking, CPU-visible PPU mode/access boundary timing,
+SCX- and sprite-dependent mode-3 duration, LCD-enable startup, LY/coincidence
+phasing, the DMG line-144 mode-2 STAT pulse, the final-VBlank mode-2 pulse,
+LCD-off LYC coincidence behavior, DMG-ABC serial boot-clock alignment, and all
+basic TIMA rates.
+
+The PPU acceptance result depends on an ownership rule that should be preserved
+when adding instructions. CPU instructions advance the PPU to the machine cycle
+where a video-bus read or write occurs, perform that access, then advance the
+remaining instruction cycles. The frontend and headless runner therefore call
+`CPU::cycle_with_ppu`; they must not also advance the PPU after the instruction.
+Ordinary memory retains its established timing, and active OAM DMA retains
+ownership of OAM timing. Video-register, VRAM, and non-DMA OAM accesses use the
+scoped timed path. Reads and writes intentionally do not share one blanket
+boundary: the hardware-visible VRAM lock begins at mode-2 dot 76, OAM writes
+have a dot-76 aperture, and selected `LD A,(HL)` observations sample at their
+actual end-of-access phase.
+
+The scanline model also keeps signals separate instead of deriving every effect
+from the two visible STAT mode bits. Normal LY advances at dot 444; the first two
+DMG LCD-startup lines advance at dot 452; coincidence is refreshed at the dot-456
+line boundary. Mode-0 STAT can raise the shared STAT line four dots before the
+visible transfer-to-HBlank transition. Transient mode-2 sources exist at DMG
+LY 144 and at the end of LY 153, but still pass through the shared rising-edge
+detector, so another active STAT source blocks a duplicate request. Mode 3 starts
+from the SCX low-bit cost and adds the first ten on-line sprite fetch stalls,
+including X-position alignment and the off-right-edge cutoff. These distinctions
+are covered by focused unit tests plus the two full-suite ignored guards above.
 
 Run the passing DMG/CGB APU core set directly with:
 

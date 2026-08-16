@@ -829,6 +829,29 @@ pub struct PostBootRegisters {
         mmu_ref.set_byte(addr, data);
     }
 
+    fn is_video_bus_address(addr: usize) -> bool {
+        (0x8000..=0x9FFF).contains(&addr)
+            || (0xFE00..=0xFE9F).contains(&addr)
+            || (0xFF40..=0xFF45).contains(&addr)
+            || (0xFF47..=0xFF4B).contains(&addr)
+    }
+
+    fn video_bus_cycle(
+        mmu_ref: &mmu::MMU,
+        addr: usize,
+        legacy_cycle: u8,
+        video_cycle: u8,
+    ) -> u8 {
+        if (0xFE00..=0xFE9F).contains(&addr) && mmu_ref.oam_dma_active() {
+            return legacy_cycle;
+        }
+        if Self::is_video_bus_address(addr) {
+            video_cycle
+        } else {
+            legacy_cycle
+        }
+    }
+
     fn timed_immediate_word(&mut self, mmu_ref: &mut mmu::MMU) -> u16 {
         let low_addr = self.pc.wrapping_add(1) as usize;
         let high_addr = self.pc.wrapping_add(2) as usize;
@@ -1356,7 +1379,16 @@ pub struct PostBootRegisters {
                                 mmu_ref.set_byte(0xFF04 as usize, 0);
                             },
                             0x11 => self.set_de(nn),
-                            0x12 => mmu_ref.set_byte(self.get_de() as usize, self.a),
+                            0x12 => {
+                                let addr = self.get_de() as usize;
+                                self.timed_write(
+                                    mmu_ref,
+                                    ppu_ref,
+                                    addr,
+                                    self.a,
+                                    Self::video_bus_cycle(mmu_ref, addr, 0, cycles - 4),
+                                )
+                            },
                             0x13 => {
                                 let value = self.get_de();
                                 mmu_ref.trigger_oam_idu_corruption(value);
@@ -1373,7 +1405,15 @@ pub struct PostBootRegisters {
                                 let new_hl = add_double_regs(hl, de, &mut self.f);
                                 self.set_hl(new_hl);
                             },
-                            0x1A => self.a = mmu_ref.get_byte(self.get_de() as usize),
+                            0x1A => {
+                                let addr = self.get_de() as usize;
+                                self.a = self.timed_read(
+                                    mmu_ref,
+                                    ppu_ref,
+                                    addr,
+                                    Self::video_bus_cycle(mmu_ref, addr, 0, cycles - 4),
+                                )
+                            },
                             0x1B => {
                                 let de = self.get_de();
                                 mmu_ref.trigger_oam_idu_corruption(de);
@@ -1566,7 +1606,20 @@ pub struct PostBootRegisters {
                             0x7B => self.a = self.e,
                             0x7C => self.a = self.h,
                             0x7D => self.a = self.l,
-                            0x7E => self.a = mmu_ref.get_byte(self.get_hl() as usize),
+                            0x7E => {
+                                let addr = self.get_hl() as usize;
+                                self.a = self.timed_read(
+                                    mmu_ref,
+                                    ppu_ref,
+                                    addr,
+                                    match addr {
+                                        0xFF41 => cycles,
+                                        0xFF44 => cycles,
+                                        0xFE00..=0xFE9F if !mmu_ref.oam_dma_active() => cycles,
+                                        _ => 0,
+                                    },
+                                )
+                            },
                             0x7F => self.a = self.a,
                             0x80 => self.a = add_reg(self.a, self.b, &mut self.f),
                             0x81 => self.a = add_reg(self.a, self.c, &mut self.f),
@@ -1796,15 +1849,36 @@ pub struct PostBootRegisters {
                                 self.pc = 0x18;
                                 skip_increment = true;
                             },
-                            0xE0 => self.timed_write(
-                                mmu_ref,
-                                ppu_ref,
-                                (0xFF00 + (n as u16)) as usize,
-                                self.a,
-                                cycles - 8,
-                            ),
+                            0xE0 => {
+                                let addr = (0xFF00 + n as u16) as usize;
+                                self.timed_write(
+                                    mmu_ref,
+                                    ppu_ref,
+                                    addr,
+                                    self.a,
+                                    if addr == 0xFF41 {
+                                        cycles - 8
+                                    } else {
+                                        Self::video_bus_cycle(
+                                            mmu_ref,
+                                            addr,
+                                            cycles - 8,
+                                            cycles - 4,
+                                        )
+                                    },
+                                )
+                            },
                             0xE1 => {let hl_val = self.stack_pop(mmu_ref); self.set_hl(hl_val);},
-                            0xE2 => mmu_ref.set_byte((0xFF00 + (self.c as u16)) as usize, self.a),
+                            0xE2 => {
+                                let addr = (0xFF00 + self.c as u16) as usize;
+                                self.timed_write(
+                                    mmu_ref,
+                                    ppu_ref,
+                                    addr,
+                                    self.a,
+                                    Self::video_bus_cycle(mmu_ref, addr, 0, cycles - 4),
+                                )
+                            },
                             0xE3 => (),
                             0xE4 => (),
                             0xE5 => self.stack_push_at(mmu_ref, ppu_ref, self.get_hl(), 4, 8),
@@ -1835,13 +1909,16 @@ pub struct PostBootRegisters {
                                 self.set_sp(new_sp);
                             },
                             0xE9 => self.pc = self.get_hl() - (instruction_size as u16),
-                            0xEA => self.timed_write(
-                                mmu_ref,
-                                ppu_ref,
-                                nn as usize,
-                                self.a,
-                                cycles - 8,
-                            ),
+                            0xEA => {
+                                let addr = nn as usize;
+                                self.timed_write(
+                                    mmu_ref,
+                                    ppu_ref,
+                                    addr,
+                                    self.a,
+                                    Self::video_bus_cycle(mmu_ref, addr, cycles - 8, cycles - 4),
+                                )
+                            },
                             0xEB => (),
                             0xEC => (),
                             0xED => (),
@@ -1852,15 +1929,24 @@ pub struct PostBootRegisters {
                                 skip_increment = true;
                             },
                             0xF0 => {
+                                let addr = 0xFF00 + n as usize;
                                 self.a = self.timed_read(
                                     mmu_ref,
                                     ppu_ref,
-                                    0xFF00 + n as usize,
-                                    cycles - 8,
+                                    addr,
+                                    Self::video_bus_cycle(mmu_ref, addr, cycles - 8, cycles - 4),
                                 )
                             }
                             0xF1 => {let af_val = self.stack_pop(mmu_ref); self.set_af(af_val);},
-                            0xF2 => self.a = mmu_ref.get_byte((0xFF00 + (self.c as u16) as usize)),
+                            0xF2 => {
+                                let addr = 0xFF00 + self.c as usize;
+                                self.a = self.timed_read(
+                                    mmu_ref,
+                                    ppu_ref,
+                                    addr,
+                                    Self::video_bus_cycle(mmu_ref, addr, 0, cycles - 4),
+                                )
+                            },
                             0xF3 => {
                                 self.ime = false;
                                 self.ei_pending = false;
@@ -1894,8 +1980,13 @@ pub struct PostBootRegisters {
                                 self.set_sp(hl);
                             },
                             0xFA => {
-                                self.a =
-                                    self.timed_read(mmu_ref, ppu_ref, nn as usize, cycles - 8)
+                                let addr = nn as usize;
+                                self.a = self.timed_read(
+                                    mmu_ref,
+                                    ppu_ref,
+                                    addr,
+                                    Self::video_bus_cycle(mmu_ref, addr, cycles - 8, cycles - 4),
+                                )
                             }
                             0xFB => self.ei_pending = true, 
                             0xFC => (),

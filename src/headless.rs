@@ -242,7 +242,7 @@ impl GameBoy {
 
         let pc = self.cpu.program_counter();
         let bank = self.mmu.mapped_rom_bank(pc);
-        let cycles = self.cpu.cycle(&mut self.mmu);
+        let cycles = self.cpu.cycle_with_ppu(&mut self.mmu, &mut self.ppu);
         assert!(
             cycles > 0,
             "CPU returned zero cycles at bank {:#04x}, PC {:#06x}",
@@ -251,7 +251,6 @@ impl GameBoy {
         );
         let peripheral_cycles = self.mmu.peripheral_cycles(cycles);
         self.mmu.tick_rtc(u64::from(peripheral_cycles));
-        self.ppu.cycle(peripheral_cycles, &mut self.mmu);
         if self.apu_enabled {
             self.apu.cycle(peripheral_cycles, &mut self.mmu);
             while self._audio_receiver.try_recv().is_ok() {}

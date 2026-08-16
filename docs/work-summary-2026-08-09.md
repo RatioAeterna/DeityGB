@@ -1316,6 +1316,344 @@ per-cycle PPU loop was tried and rejected because it slowed the suite
 substantially without increasing the pass count; the next version needs to
 advance only to scheduled PPU edges and timed memory accesses.
 
+### Mooneye 71/75 VBlank STAT Follow-Up
+
+The protected acceptance baseline is now 71/75. The new pass is
+`ppu/vblank_stat_intr-GS.gb`; the earlier 70 cases remain in the known-pass
+guard. The remaining failures are `ppu/hblank_ly_scx_timing-GS.gb`,
+`ppu/intr_2_mode0_timing_sprites.gb`, `ppu/lcdon_timing-GS.gb`, and
+`ppu/lcdon_write_timing-GS.gb`.
+
+`vblank_stat_intr-GS.gb` covers a separate DMG-family quirk. When STAT's mode-2
+source is enabled, entering VBlank at LY 144 produces a STAT interrupt at the
+same edge as the VBlank interrupt even though STAT's visible mode becomes mode
+1 rather than mode 2. The PPU now emits that short source pulse at the
+HBlank-to-VBlank transition. It passes through the same shared STAT-line edge
+detector rule: a pulse requests IF bit 1 only if the combined STAT line was
+previously low, preserving STAT source blocking when LYC or another mode
+source already holds the line high. Focused tests seed LY 143/HBlank, advance
+four dots, and verify LY 144, visible mode 1, and the STAT request together;
+a second case holds the mode-0 source high across the same transition and
+verifies that the line-144 pulse is blocked while VBlank still requests IF.
+A CGB negative case verifies that this DMG/SGB-family quirk is not synthesized
+when the cartridge runs in color mode.
+
+Several broader experiments were explicitly rejected. An HBlank LY lookahead
+did make `hblank_ly_scx_timing-GS.gb` pass, first across the late HBlank window
+and then at only the exact dot-448 phase. Both forms changed Kirby's established
+deterministic gameplay framebuffer hash, so the LY change and its provisional
+test/guard entry were removed. A sprite penalty was connected to a variable
+mode-3 boundary and did move the sprite ROM's polling
+counter, unlike the earlier ineffective experiment whose MMU boundary remained
+hard-coded. However, the ROM's adjacent observations flipped together because
+memory instructions are still atomic; no whole-instruction threshold could
+satisfy both sides of the edge. LCD-enable experiments reproduced much of the
+special first-line mode sequence but hit the same read-versus-write bus-phase
+limit. Both experiments were removed rather than preserving partial timing
+that could perturb games or the 70 established passes. Completing the last
+four ROMs requires CPU memory accesses and PPU events to meet at their actual
+machine-cycle positions.
+
+Verification for this change includes the focused STAT unit tests, the complete
+ordinary release suite, the 71-case known-pass guard, the full acceptance
+classifier with its 10-second/APU-disabled budget, and representative ignored
+DMG/CGB APU, CGB rendering, frontend, cartridge-save, and gameplay checks.
+
+### Mooneye 75/75 Timed CPU/PPU Bus Integration
+
+The bundled Mooneye acceptance tree is now fully green: 75 passed, 0 failed,
+and 0 timed out with APU disabled and a ten-second per-ROM budget. The four
+remaining ROMs added to the protected list are
+`ppu/hblank_ly_scx_timing-GS.gb`,
+`ppu/intr_2_mode0_timing_sprites.gb`, `ppu/lcdon_timing-GS.gb`, and
+`ppu/lcdon_write_timing-GS.gb`. Re-running the complete guard also exposed and
+resolved neighboring phase assumptions in `intr_1_2_timing-GS`,
+`intr_2_0_timing`, `intr_2_mode0_timing`, and `intr_2_oam_ok_timing`; all 75
+cases pass together rather than only as isolated targets.
+
+The architectural fix is that CPU/PPU synchronization now belongs to the CPU
+instruction while a video-bus transaction is in flight. `cycle_with_ppu`
+advances timers, DMA, serial, DIV/TIMA, and the PPU up to a timed memory access,
+performs the access against that exact PPU state, then advances the remainder of
+the instruction. Both the headless loop and macroquad frontend use this path and
+no longer make a second whole-instruction PPU call. The older `cycle` entry point
+remains for callers that do not supply a PPU. This avoids a false choice between
+moving every PPU edge an entire instruction early or late.
+
+Timed access is deliberately scoped. VRAM, OAM, LCD/STAT/scroll registers, and
+palette/window registers use their video-bus phase for the load/store forms the
+ROMs exercise. Ordinary memory retains its previous timing. `FF46` is excluded
+from the generic video-register set because OAM DMA start/restart owns that bus
+schedule, and OAM reads fall back to legacy timing while DMA is active. This
+ownership boundary preserved `add_sp_e_timing`, `oam_dma_restart`, and the OAM
+DMA acceptance cases while allowing STAT, LY, VRAM, and non-DMA OAM observations
+to occur within their instruction.
+
+The MMU no longer invents a single early visible PPU mode to control every bus.
+Visible STAT mode remains the raw hardware mode. VRAM nevertheless locks at
+mode-2 dot 76, and OAM read/write arbitration is modeled independently. In
+particular, the LCD-enable write test requires an OAM-write aperture at exactly
+dot 76, while reads remain blocked by modes 2/3 and by the early next-line ban.
+That asymmetry is intentional: a shared `observable_mode` approximation could
+make one ROM pass only by breaking another because status reporting and each bus
+do not change on exactly the same dot.
+
+LCD enable now has an explicit DMG startup phase. Enabling LCD begins with
+visible mode 0, starts the first transfer at dot 80, and tracks the first and
+follow-up scanlines separately. Their LY edge occurs at dot 452; normal visible
+scanlines use dot 444; the dot-456 boundary owns mode transition and coincidence
+refresh. During the pre-boundary LY window the coincidence bit is cleared and
+the next-line OAM ban is asserted. LCD-off state still forces LY 0, mode 0, and
+open video buses, preserving `stat_lyc_onoff`.
+
+Mode 3 is no longer a fixed 172-dot interval. The background base includes
+`SCX & 7`. With objects enabled, the first ten sprites intersecting the scanline
+are selected, DMG priority order is applied, X >= 168 is excluded, each fetch
+adds six dots, and the first sprite touching a fetch tile adds its alignment
+penalty. The aggregate penalty is aligned to the four-dot observation grid used
+by the CPU/PPU scheduler. This is the first sprite-duration model that satisfies
+the full `intr_2_mode0_timing_sprites` position matrix; the earlier flat
+`visible_sprites * 6` experiment could not represent alignment or overlap.
+
+STAT remains one shared interrupt line, not four independent interrupts. The
+line now accepts short internal sources without rewriting visible STAT mode:
+the mode-0 source can rise four dots before visible HBlank, DMG-family LY 144
+can pulse the mode-2 source on VBlank entry, and LY 153 can pulse it immediately
+before the new-frame boundary. Every source still flows through the same
+low-to-high detector. Consequently `stat_irq_blocking` remains green and an
+already-high coincidence/mode source suppresses a duplicate IF request.
+
+Focused tests pin the DMG LY-144 pulse and blocking behavior, the CGB negative
+case, normal-line LY dot 444, LCD-startup LY dot 452, the VRAM dot-76 lock, and
+the one-dot OAM-write aperture. Verification after the final fix was:
+
+- ordinary release suite: green;
+- Mooneye known-pass guard: 75/75;
+- Mooneye full classifier: 75 passed, 0 failed, 0 timed out;
+- Blargg sound core: 12/12 DMG and 12/12 CGB;
+- CGB Acid2 reference framebuffer: green;
+- Pokémon Silver color-title regression: green;
+- Pokémon Red new-game-menu regression: green;
+- Kirby Green Greens deterministic framebuffer: green.
+
+The implementation intentionally remains an event-at-memory-cycle model rather
+than a per-dot CPU interpreter. Future instruction work should add a timed access
+only when the addressed device is phase-sensitive and keep ownership exclusions
+such as active OAM DMA explicit. Broadly retiming all memory or deriving bus
+access solely from visible STAT mode would undo the regression safety gained
+here.
+
+#### A timing vocabulary for reading this code
+
+It helps to separate four units that are easy to blur together:
+
+- A **dot**, or T-cycle, is the PPU's smallest clock step in normal-speed DMG
+  operation. One scanline lasts 456 dots.
+- A **machine cycle**, or M-cycle, is four dots for the normal-speed CPU. Memory
+  transfers are placed on machine-cycle boundaries in this implementation.
+- An **instruction** contains one or more machine cycles. An eight-dot load is
+  not one indivisible hardware event: opcode fetch and memory access occur at
+  different times inside it.
+- A **frame** contains 154 scanlines: 144 visible lines and 10 VBlank lines.
+
+Before this work, DeityGB effectively did this for each instruction:
+
+```text
+CPU executes every effect of the instruction
+PPU advances by the instruction's complete duration
+```
+
+That is adequate while software observes only instruction-to-instruction state.
+It is insufficient when an instruction straddles a PPU edge. For example, if an
+eight-dot `LD A,(HL)` begins two dots before OAM becomes readable, neither
+"perform the read before advancing eight dots" nor "advance eight dots and then
+perform the read" represents the real bus transaction. The former samples too
+early and the latter too late.
+
+The new path is conceptually:
+
+```text
+advance shared clocks to the instruction's memory phase
+perform the read or write against that exact PPU/MMU state
+advance shared clocks through the rest of the instruction
+```
+
+The CPU still returns the instruction's total duration to its caller. The
+difference is that `timer_cycles_advanced` records how much of that duration was
+already consumed before a timed access. At instruction retirement, only the
+remaining cycles are advanced. This prevents timers, serial, DMA, or the PPU
+from being double-stepped.
+
+#### What the last four ROMs ask, in plain English
+
+| ROM | Plain-English question | Emulator behavior it protects |
+| --- | --- | --- |
+| `hblank_ly_scx_timing-GS` | After HBlank begins, exactly when does the line number change, and how does horizontal scroll move that interval? | The SCX low bits lengthen pixel transfer, the mode-0 STAT edge precedes the visible transition, and normal LY advances at dot 444. |
+| `intr_2_mode0_timing_sprites` | If sprites interrupt background fetching, how much later does HBlank begin for each sprite position? | Mode 3 has position- and overlap-dependent sprite stalls rather than a constant or `sprite_count * 6` duration. |
+| `lcdon_timing-GS` | Immediately after software turns the LCD on, what sequence of modes and LY values can the CPU read? | DMG LCD startup is its own state machine, not an ordinary scanline beginning at mode 2. |
+| `lcdon_write_timing-GS` | When the LCD has just been enabled, which exact writes to OAM or video registers land, and which are blocked? | Read and write gates have distinct phases, including the dot-76 OAM-write aperture. |
+
+These are valuable beyond earning four checkmarks. Games commonly initialize
+the LCD, update OAM near HBlank, poll STAT instead of using interrupts, or time
+effects relative to LY. Passing these tests means those operations meet a
+coherent shared timeline rather than a collection of ROM-name-specific special
+cases.
+
+#### The visible-line timeline
+
+The important normal-line landmarks can be read approximately as follows. Mode
+3's end moves to the right with SCX and sprite stalls, but the line still totals
+456 dots.
+
+```text
+dot       0                 76  80            variable       444       456
+          |-----------------|---|-----------------|------------|----------|
+mode      2: OAM scan           3: pixel transfer    0: HBlank
+VRAM      open              locks                unlocks
+OAM       blocked through modes 2 and 3             readable
+LY        current line                                      next line
+STAT/LYC  current coincidence                    mode-0 edge   refresh at boundary
+```
+
+This diagram deliberately shows several rows because there is no single
+"current PPU mode" value that answers every bus question. Visible STAT bits,
+VRAM arbitration, OAM arbitration, LY, coincidence, and the shared STAT IRQ
+wire are related signals, but hardware does not switch all of them on one dot.
+The earlier `observable_ppu_mode` approach conflated those signals: moving the
+mode early helped one ROM and necessarily moved unrelated reads, writes, and
+interrupt sources early too.
+
+LCD startup uses a different timeline. On DMG-family hardware the first line
+begins visibly in mode 0, transfer starts at dot 80, LY advances at dot 452, and
+the line boundary remains dot 456. The following startup line retains the late
+LY phase before normal dot-444 behavior begins. Encoding those phases as named
+state makes the exception local and makes LCD-off reset behavior explicit.
+
+#### Why LY and LYC coincidence are separate
+
+`LY == LYC` sounds like it should be a continuously evaluated expression, but
+the externally visible coincidence flag behaves like a latched signal at these
+boundaries. DeityGB therefore stores the raw LY byte independently, advances it
+at the modeled LY edge, clears coincidence during the pre-boundary gap, and
+refreshes coincidence at dot 456. Reading LY through the MMU and asking the PPU
+for its internal line must refer to the same raw value; routing the PPU through
+a CPU-facing read transformation would make internal scheduling depend on bus
+presentation policy.
+
+The early OAM ban is similarly explicit. Once LY has advanced but before mode 2
+is visibly established, the next line already owns OAM. `ppu_oam_early_ban`
+represents that bus fact without lying about the STAT mode bits.
+
+#### The shared STAT interrupt wire
+
+STAT exposes several enable bits—mode 0, mode 1, mode 2, and LYC—but they feed a
+single interrupt wire. IF bit 1 is requested only when the combined wire changes
+from low to high. If one enabled source already holds it high, another source
+becoming true does not create a second interrupt. This is why implementing each
+STAT source as an independent `request_interrupt()` call breaks
+`stat_irq_blocking`.
+
+The new transient sources are inputs to that same combined line:
+
+- mode 0 can assert internally four dots before visible HBlank;
+- DMG-family hardware produces a short mode-2 source when LY 144 enters VBlank;
+- a mode-2 source appears near dot 452 of LY 153 before the new frame begins.
+
+`update_stat_irq_line_with_source` combines a transient source with the ordinary
+STAT condition and then performs the same rising-edge check. It does not mutate
+visible STAT mode bits merely to manufacture an interrupt. This distinction is
+why the new VBlank cases pass without regressing source blocking.
+
+#### How sprite stalls are approximated
+
+The Game Boy does not render a whole sprite in one atomic operation. Object
+fetches temporarily compete with background/window fetching, and the delay
+depends on when the fetcher encounters each object. A useful timing model must
+therefore consider more than the number of visible objects.
+
+For the current scanline, DeityGB:
+
+1. selects at most the first ten OAM entries intersecting the line;
+2. applies DMG X-position/OAM-index ordering where appropriate;
+3. ignores X positions at or beyond 168 because they cannot stall visible
+   output in the tested way;
+4. charges the six-dot object-fetch cost;
+5. adds an alignment penalty when the first object touching a background fetch
+   tile forces the fetcher to wait;
+6. avoids charging that first-touch alignment cost repeatedly for overlapping
+   objects on the same tile;
+7. quantizes the aggregate to the four-dot observation grid used by timed CPU
+   accesses.
+
+This is still an event-level duration model, not a literal pixel FIFO. That
+boundary is worth documenting: it captures the hardware relationships covered
+by the acceptance matrix while keeping the existing scanline renderer intact.
+If a future ROM requires window-trigger penalties or mid-scanline register
+effects, the next step should be a scheduled FIFO/fetcher event, not another
+flat constant added for a named ROM.
+
+#### Bus ownership and intentional asymmetry
+
+| Resource | Normal owner | Important exception |
+| --- | --- | --- |
+| STAT/LY/LCDC/scroll/palette/window registers | CPU access at its instruction memory phase | PPU internal reads use raw state, not CPU-facing presentation. |
+| VRAM | CPU when the PPU bus is open | Locks at mode-2 dot 76 and throughout transfer. |
+| OAM reads | CPU outside PPU modes 2/3 | The early next-line ban also blocks reads; active DMA keeps legacy DMA-owned timing. |
+| OAM writes | CPU only in its write aperture | Mode 2 dot 76 is intentionally treated differently from surrounding dots. |
+| `FF46` DMA control | OAM DMA scheduler | Excluded from generic video-bus retiming so start/restart tests keep their established phase. |
+| Timers, serial, DIV, TIMA | CPU shared-clock advancement | They advance alongside the PPU to each timed access and through instruction retirement. |
+
+This table is the main maintenance contract. A new helper that says "all video
+addresses happen at cycle X" is likely too broad. The correct question is which
+device owns the bus at that moment and whether the operation is a read, a write,
+an internal PPU observation, or a DMA transaction.
+
+#### How the failures guided the implementation
+
+The productive debugging loop was to promote each newly passing ROM into the
+full known-pass guard immediately. Several changes made a target green but
+revealed the next adjacent regression:
+
+- broad video timing disturbed `add_sp_e_timing` through `FF46`, identifying DMA
+  as a separate owner;
+- retimed OAM access disturbed DMA restart, showing that active DMA needed an
+  explicit fallback;
+- STAT read timing exposed `intr_2_mode0_timing`, separating read phase from the
+  internal STAT source;
+- VBlank work exposed `intr_1_2_timing`, revealing the LY-153 transient;
+- the early mode-0 source exposed HBlank/LY timing, leading to the dot-444 normal
+  LY edge;
+- OAM-read timing exposed `intr_2_oam_ok_timing`, pinning the end-of-access
+  sample for non-DMA `LD A,(HL)`.
+
+That progression is why the final classifier matters more than four individual
+passes. Timing fixes are highly coupled; a local pass can be evidence that the
+same edge was moved incorrectly for another observer. The 75-case guard tests
+the combined model.
+
+#### Maintenance checklist
+
+When changing CPU, MMU, or PPU timing in the future:
+
+1. Decide who owns the affected bus and whether DMA overrides the CPU.
+2. Identify the instruction's actual memory phase rather than using instruction
+   start or retirement by default.
+3. Keep internal PPU state, visible register bits, bus gates, and IRQ sources as
+   separate signals unless hardware evidence says they coincide.
+4. Do not advance the PPU both inside `cycle_with_ppu` and again in the caller.
+5. Add a focused boundary test for the smallest new rule.
+6. Run the 75-case known-pass guard after every new pass, not only at the end.
+7. Run the complete classifier to catch timeouts and cases omitted accidentally
+   from a hand-maintained list.
+8. Recheck long-running games, both Acid2 images, sound ROMs, saves, and the
+   frontend whenever clock ownership changes.
+
+The central lesson is that cycle accuracy is less about accumulating more
+special-case numbers and more about putting each observable event on the right
+shared timeline. Once the CPU access, PPU edge, and bus owner are represented
+separately, the awkward-looking hardware cases become compatible rather than
+contradictory.
+
 ## Frontend TAB Fast-Forward
 
 The macroquad frontend now treats a held TAB key as a deliberate user
