@@ -61,9 +61,9 @@ about giving that joy—and this project—the care and attention they deserve.
 
 ### Then and now
 
-The old screenshots are part of the fun. They are a record of the moment when
-the emulator could execute a game but did not yet understand everything the
-hardware was trying to tell it.
+The old screenshots are part of the fun. They capture a stage when games were
+running, but DeityGB's graphics emulation was still producing some spectacular
+mistakes.
 
 <table>
   <tr>
