@@ -23,27 +23,41 @@ games, and start playing. No command line required.
 Bring your own legally obtained `.gb` and `.gbc` ROMs; games are not part of a
 normal DeityGB release.
 
-## A long road home
+## A project worth returning to
 
-I started this beloved project in 2021, fresh out of my freshman-year computer
-architecture class at the University of Texas. Building a Game Boy emulator
-felt like the perfect way to find out whether I had really understood any of
-it. Then life did what life does: the project followed me through several years
-of changing priorities, long pauses, occasional bursts of progress, and all the
-general chaos in between.
+I started DeityGB in 2021 after my freshman-year computer architecture class at
+the University of Texas. I was excited by what I had learned and wanted a
+project where I could put it into practice. Emulating the Game Boy was the
+obvious choice: it was the machine behind so many of the games I had loved as a
+kid.
 
-In 2025, DeityGB finally began to feel like a real Game Boy. The DMG boot ROM
-worked. Tetris became playable. Before long, Link's Awakening and Super Mario
-Land were playable too—even if they still carried a few charmingly incorrect
-graphics along for the ride.
+For the next few years, life repeatedly pulled my attention elsewhere. DeityGB
+became one of those important unfinished projects I kept returning to whenever
+there was room. Progress came in uneven stretches, but the original goal never
+really went away.
 
-And now, at long last, 2026 is the year DeityGB is getting the finish it always
-deserved: native Game Boy Color support, accurate audio, persistent saves and
-clocks, desktop applications, a proper game library, full Mooneye and Blargg
-coverage, and years of accumulated hardware mysteries finally tracked down one
-cycle at a time.
+The project reached a turning point in 2025. The DMG boot ROM finally ran,
+Tetris became playable, and then Link's Awakening and Super Mario Land followed.
+They still had graphical problems, but this was the first time DeityGB felt less
+like an experiment and more like a Game Boy I could actually sit down and use.
 
-It took the scenic route. It made it home.
+There were always easier ways to play these games, but playing them was only
+half the appeal. The other half was building the thing that made them run.
+Watching Tetris boot for the first time, seeing Charmander appear on a screen I
+had rendered myself, or walking around a familiar world and knowing that every
+instruction, tile, and sound had passed through a machine I built was deeply
+satisfying in a way that simply launching another emulator could never be.
+
+In 2026, I came back determined to finish it properly. That has meant more than
+getting a few additional games to boot: native Game Boy Color support, accurate
+four-channel audio, persistent saves and real-time clocks, packaged desktop
+applications, a proper ROM library, full Mooneye and bundled Blargg coverage,
+and careful fixes for hardware behavior measured in individual clock cycles.
+
+DeityGB has lasted because it has always been about the joy of creating
+something for its own sake, and about finding my way back to games that meant a
+lot to me growing up. Finishing it now is not about proving anything. It is
+about giving that joy—and this project—the care and attention they deserve.
 
 ### Then and now
 
