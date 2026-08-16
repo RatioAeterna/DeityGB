@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=DeityGB
+Comment=Game Boy and Game Boy Color emulator
+Exec=DeityGB %f
+Icon=deitygb
+StartupWMClass=DeityGB
+Terminal=false
+Categories=Game;Emulator;
+MimeType=application/x-gameboy-rom;

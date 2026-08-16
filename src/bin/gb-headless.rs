@@ -230,6 +230,18 @@ fn main() {
         &gb.mmu.memory[tile_address..tile_address + 16],
         &gb.mmu.memory[0x9800..0x9810],
     );
+    println!(
+        "apu: nr10-nr14={:02x?} nr21-nr24={:02x?} nr30-nr34={:02x?} nr41-nr44={:02x?} nr50={:#04x} nr51={:#04x} nr52={:#04x} pcm12={:#04x} pcm34={:#04x}",
+        &gb.mmu.memory[0xFF10..=0xFF14],
+        &gb.mmu.memory[0xFF16..=0xFF19],
+        &gb.mmu.memory[0xFF1A..=0xFF1E],
+        &gb.mmu.memory[0xFF20..=0xFF23],
+        gb.mmu.get_raw_byte(0xFF24),
+        gb.mmu.get_raw_byte(0xFF25),
+        gb.mmu.get_raw_byte(0xFF26),
+        gb.mmu.pcm12,
+        gb.mmu.pcm34,
+    );
     if let Some(path) = dump_frame {
         let rgba = gb.framebuffer_rgba();
         write_ppm(&path, &rgba).expect("failed to write frame dump");

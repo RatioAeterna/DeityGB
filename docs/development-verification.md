@@ -216,6 +216,28 @@ single ROM in both bundled sound suites, including frame-sequencer power timing,
 DMG/CGB length persistence, active wave-RAM arbitration, and DMG wave-retrigger
 corruption. A failure prints the suite, ROM name, and Blargg memory diagnostic.
 
+The default library tests also include focused envelope-period coverage. Run it
+alone while changing envelope behavior with:
+
+```sh
+nix develop --command cargo test --release apu::tests:: -- --nocapture
+```
+
+In particular, a programmed envelope period of zero must reload its hidden
+timer as 8 without performing automatic volume changes. This is not equivalent
+to an ordinary programmed period of 8. Oracle of Seasons uses noise `NR42 = 08`
+to keep the DAC enabled at volume zero; the historical bug slowly raised that
+channel to volume 15 and produced persistent overworld noise.
+
+The headless runner's final report includes raw APU registers plus CGB `PCM12`
+and `PCM34`. For an audible game-specific investigation, reproduce the same
+ROM/save/input checkpoint before and after a change and compare those values.
+The Oracle checkpoint that found this issue retained `NR41-NR44 = [00,08,07,00]`
+and `NR52 = 8F`, while the fix changed channel 4's `PCM34` nibble from `F` to
+`0`. That is a stronger diagnostic than comparing recordings made through two
+different host audio stacks: it proves the unwanted waveform existed inside the
+emulated channel before host mixing.
+
 Headless diagnostics accept `--trace` to enable the CPU instruction/state trace
 and print CGB mode, KEY1, and double-speed state in the final report. Use this
 selectively because instruction traces become large quickly.
@@ -225,6 +247,121 @@ suite. It covers clean first boot without file creation, MBC3 SRAM bank
 round-trip, exact-size `.sav` behavior for normal/truncated/oversized files,
 non-battery cartridges staying disk-silent, atomic dirty flush behavior, and
 MBC3 RTC sidecar restoration including halted-clock handling.
+
+## Desktop Frontend and Packaging
+
+The GUI can be built and exercised without supplying a ROM on the command line:
+
+```sh
+nix develop --command cargo build --release --bin DeityGB
+./target/release/DeityGB
+```
+
+Press Enter on the splash, select a ROM directory in the folder browser, and
+verify that the in-app library finds `.gb` and `.gbc` files recursively. Check
+W/S, arrow keys, and Tab for single-row navigation, then hold each control to
+verify delayed repeat and accelerated scrolling; A/D and Left/Right for ten-row
+navigation; J or Enter to launch; and K or Escape to return to the directory
+chooser. Also launch once with a ROM path to retain the developer and automation
+path:
+
+```sh
+./target/release/DeityGB path/to/game.gb
+```
+
+Verify normal-speed gameplay on both a 60 Hz display and a high-refresh display
+(120/144 Hz where available). The emulated-rate overlay should remain near the
+Game Boy's 59.7275 frames per second regardless of host refresh. Holding Tab
+should be the only normal frontend path to approximately 2x emulation; releasing
+it must immediately return music, animation, and input timing to normal speed.
+
+For an automatable packaging smoke test that does not need a synthetic Enter
+keypress, `./target/release/DeityGB --choose-rom` skips the splash and opens the
+same asynchronous chooser immediately. Linux uses a built-in directory-only
+browser: select `[ Use this folder ]` to scan the displayed directory, J or
+Enter to open a highlighted subdirectory, and K or Backspace to move upward.
+No `zenity`, `kdialog`, portal, or other desktop-dialog helper is required.
+
+While the chooser is open, confirm that the process remains responsive and its
+memory use stays bounded. On Linux, enter several directories and confirm that
+each directory-only listing appears without file-manager thumbnail delays.
+Select a large directory and confirm that a
+scanning message continues to render. Discovery must skip symbolic links,
+especially links that point to an ancestor directory; the unit test constructs
+that cycle on Unix systems so a regression cannot recurse indefinitely.
+On macOS, also inspect `~/Library/Logs/DiagnosticReports` after accepting and
+cancelling the chooser: neither path may create a `DeityGB-*.ips` report. The
+chooser intentionally runs in the system `osascript` helper rather than placing
+an rfd AppKit modal panel inside miniquad's event loop.
+
+On Linux, repeat the same responsiveness check and verify that the waiting
+message continues to be presented for as long as the chooser is open. The
+frontend must poll a bounded channel and call `next_frame()`; it must never
+await a portal future directly on the render coroutine. Test accept, cancel,
+and repeated reopen with the available desktop helper. If no helper is
+installed, DeityGB should print a diagnostic and return to the splash.
+
+After launching a ROM, judge pacing with gameplay and audio rather than the FPS
+label alone. With LCD enabled, only a real PPU VBlank may cause a host
+presentation; the 70,224-cycle fallback is reserved for LCD-off responsiveness.
+The focused `enabled_lcd_does_not_present_a_fallback_frame_before_vblank` test
+guards against counting two host presentations for one hardware frame.
+
+On Linux, test once with a working default audio device and once with no usable
+default ALSA device. The first path should negotiate either floating-point or
+integer samples and play normally. The second must print an `audio:` diagnostic
+and continue emulation silently rather than aborting when the ROM is launched.
+
+ROM discovery and selection wrapping have ordinary Rust unit tests. The
+packaged GUI embeds the DMG and CGB boot assets with `include_bytes!`, so verify
+both a DMG and a CGB cartridge from outside the repository. Cartridge `.sav`
+and RTC sidecar locations still derive from the selected ROM path; packaging
+must not redirect them into the read-only application bundle.
+
+Create a macOS artifact on a Mac with:
+
+```sh
+./scripts/package-macos.sh
+codesign --verify --deep --strict --verbose=2 target/release/bundle/osx/DeityGB.app
+open target/release/bundle/osx/DeityGB.app
+```
+
+The script uses `cargo-bundle`, applies an ad-hoc signature, and creates
+`dist/DeityGB-macOS.zip`. Ad-hoc signing proves bundle integrity on the machine
+that built it; it is not Apple Developer ID signing or notarization. A public
+release should inject those credentials in release infrastructure and then
+validate the downloaded artifact on a clean Mac.
+
+Create the x86-64 Linux artifact on Linux with:
+
+```sh
+./scripts/package-linux.sh
+tar -tzf dist/DeityGB-linux-x86_64.tar.gz
+```
+
+Test that archive on a clean supported distribution, including the desktop
+launcher, icon, native directory helper, audio, DMG/CGB startup, and a real
+save/reload. Also smoke-test a direct ROM argument; this isolates the emulator
+and graphics loop from chooser integration. The GitHub Actions workflow builds
+macOS and Ubuntu artifacts on version tags and by manual dispatch. A local
+macOS build cannot substitute for executing the Linux artifact on Linux.
+
+For the Linux icon, verify all three surfaces rather than merely checking that
+the PNG exists in the archive:
+
+- launch `DeityGB` and confirm its running window/task-switcher icon uses the
+  DeityGB artwork;
+- inspect the window's X11 properties and confirm `_NET_WM_ICON` is populated
+  and `WM_CLASS` contains `DeityGB`;
+- install/open the included desktop entry and confirm the application-menu icon
+  and running window are grouped together rather than appearing as two apps.
+
+Upstream miniquad 0.4.6 does not apply `Conf::icon` on Linux. DeityGB's vendored
+patch must set `_NET_WM_ICON` and `WM_CLASS` between X11 window creation and
+mapping. Use `xprop` immediately after the first frame appears; the properties
+must already be present, not appear later. Direct launch must create only one
+process and must not write desktop metadata into the user's XDG directories or
+invoke `gio`/`gtk-launch`.
 
 ## References
 

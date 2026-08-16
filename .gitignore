@@ -1,7 +1,9 @@
 /target/
+/dist/
 /log.txt
 /src/log.txt
 **/*.swp
+.DS_Store
 *.sav
 
 # Local commercial ROMs and downloaded test/tool repositories.

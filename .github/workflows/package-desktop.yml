@@ -1,0 +1,36 @@
+name: Package desktop applications
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-bundle
+        run: cargo install cargo-bundle --version 0.11.0 --locked
+      - name: Build macOS application
+        run: ./scripts/package-macos.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DeityGB-macOS
+          path: dist/DeityGB-macOS.zip
+
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install desktop build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libgl1-mesa-dev libx11-dev libxi-dev pkg-config
+      - name: Build Linux application
+        run: ./scripts/package-linux.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DeityGB-linux-x86_64
+          path: dist/DeityGB-linux-x86_64.tar.gz

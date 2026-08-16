@@ -1,8 +1,7 @@
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::BufReader;
-use std::path::Path;
 use csv::ReaderBuilder;
+
+const OPCODE_CSV: &[u8] = include_bytes!("opcodes.csv");
 
 #[derive(Clone)]
 pub struct Disassembler {
@@ -11,12 +10,9 @@ pub struct Disassembler {
 
 impl Disassembler {
     pub fn from_csv() -> Self {
-        let file = File::open("opcodes.csv")
-            .or_else(|_| File::open(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/opcodes.csv")))
-            .expect("Failed to open instruction CSV");
         let mut rdr = ReaderBuilder::new()
             .has_headers(true)
-            .from_reader(BufReader::new(file));
+            .from_reader(OPCODE_CSV);
 
         let table = rdr.records()
             .map(|r| r.expect("CSV row read failure"))
@@ -63,5 +59,17 @@ impl Disassembler {
         }
 
         Some(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Disassembler;
+
+    #[test]
+    fn opcode_table_is_embedded_in_the_executable() {
+        let disassembler = Disassembler::from_csv();
+        assert!(disassembler.lookup(0x00, false, 0, 0).is_some());
+        assert!(disassembler.lookup(0x11, true, 0, 0).is_some());
     }
 }

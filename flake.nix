@@ -1,5 +1,5 @@
 {
-  description = "Robust Implementation of the LaBRADOR Proof System";
+  description = "DeityGB Game Boy and Game Boy Color emulator";
 
   inputs = {
     nixpkgs.url = "nixpkgs/nixos-unstable"; # Adjusted to use nixos-unstable for simplicity
@@ -13,39 +13,34 @@
           inherit system;
           # Removed cargo2nix overlay to simplify
         };
-        rustPackageSet = pkgs.rustPlatform.rust {
-          # Using rustPlatform to simplify Rust package management
-          packageFun = _: {}; # Placeholder, adjust as necessary
-        };
       in
       {
         devShell = pkgs.mkShell {
           buildInputs = with pkgs; [
-	    rustc
-	    cargo
+            rustc
+            cargo
             rustup
-	    rustfmt
-	    #alsaLib
-	    #xorg.libX11
-	    #xorg.libXcursor
-	    #xorg.libXrandr
-	    #xorg.libXi
-	    #libxkbcommon
-	    libiconv
-            # Add other essential Rust tools as needed
+            rustfmt
+          ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
+            pkgs.libiconv
+          ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+            pkgs.alsa-lib
+            pkgs.libGL
+            pkgs.xorg.libX11
+            pkgs.xorg.libXi
           ];
-	  nativeBuildInputs = with pkgs.darwin.apple_sdk.frameworks; [
-	    Foundation
-	    AppKit
-	    CoreGraphics
-	    Metal
-	    MetalKit
-	    ImageIO
-	    Vision
-	    AVFoundation
-          ];
+          nativeBuildInputs = [ pkgs.pkg-config ]
+            ++ pkgs.lib.optionals pkgs.stdenv.isDarwin (with pkgs.darwin.apple_sdk.frameworks; [
+              Foundation
+              AppKit
+              CoreGraphics
+              Metal
+              MetalKit
+              ImageIO
+              Vision
+              AVFoundation
+            ]);
         };
       }
     );
 }
-

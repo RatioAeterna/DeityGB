@@ -36,6 +36,12 @@ impl Envelope {
             return;
         }
         self.timer = if self.period == 0 { 8 } else { self.period };
+        // A zero period reloads the envelope timer as 8, but does not perform
+        // automatic volume updates. Games use $08 (volume 0, increase,
+        // period 0) to keep a channel's DAC enabled while holding it silent.
+        if self.period == 0 {
+            return;
+        }
         let next = if self.increase {
             self.volume.checked_add(1).filter(|volume| *volume <= 15)
         } else {
@@ -46,6 +52,34 @@ impl Envelope {
         } else {
             self.running = false;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Envelope;
+
+    #[test]
+    fn zero_period_envelope_reloads_its_timer_without_changing_volume() {
+        let mut envelope = Envelope::default();
+        envelope.trigger(0x08);
+
+        for _ in 0..64 {
+            envelope.clock();
+        }
+
+        assert_eq!(envelope.volume, 0);
+        assert_eq!(envelope.timer, 8);
+        assert!(envelope.running);
+    }
+
+    #[test]
+    fn nonzero_period_envelope_still_changes_volume() {
+        let mut envelope = Envelope::default();
+        envelope.trigger(0x19);
+        envelope.clock();
+
+        assert_eq!(envelope.volume, 2);
     }
 }
 

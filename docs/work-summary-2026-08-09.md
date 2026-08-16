@@ -1064,6 +1064,94 @@ nix develop --command cargo test --release --test headless \
   blargg_sound_core_roms_pass -- --ignored --exact
 ```
 
+## Oracle of Seasons: Persistent Overworld Noise Fix
+
+After packaging made it possible to compare the same game on macOS and Linux,
+Oracle of Seasons exposed an audible defect that the conformance matrix did not:
+a steady, harsh noise waveform appeared while walking around the overworld and
+did not naturally decay. The identical symptom on two host operating systems was
+an important clue. Core emulation feeds both frontends the same samples, while
+the host audio backends are different. A matching sound therefore points first
+to the emulated APU state, not CoreAudio, PipeWire, buffer sizes, or GPU pacing.
+
+### Capturing the Emulated State Instead of Guessing From the Sound
+
+The headless runner now prints the four channel-register groups, mixer registers,
+channel status, and the CGB PCM observation registers at the end of a run. This
+makes an audible report reproducible without depending on a particular speaker,
+audio driver, or subjective description. At a deterministic 105-second Oracle
+state, the relevant pre-fix values were:
+
+```text
+NR41-NR44 = [00, 08, 07, 00]
+NR52      = 8F
+PCM34     = F0
+```
+
+Channel 4 is the noise generator. `NR42 = 08` programs initial volume zero,
+increasing direction, and envelope period zero. `NR52 = 8F` says the APU and all
+four channel status bits are enabled. Most decisively, the high nibble of
+`PCM34 = F0` says channel 4's instantaneous digital output had nevertheless
+become 15: full scale. The register write asked for silence, but the hidden
+envelope state had manufactured maximum-volume noise later.
+
+### The Hardware Distinction We Had Collapsed
+
+The Game Boy envelope has both a programmed period and a hidden countdown timer.
+When the programmed period is zero, hardware reloads that hidden timer with 8.
+That fact is easy to abbreviate as “period zero behaves like period eight,” but
+the abbreviation is incomplete: the timer continues to cycle, while automatic
+volume calculation remains disabled because the programmed period is zero.
+
+DeityGB previously used the substituted value 8 for both decisions. Every eight
+64 Hz envelope clocks, it increased the volume. Starting at zero, channel 4
+therefore crept upward until it reached 15 and stayed there. The delay explains
+why menus and startup could sound plausible while sustained overworld play did
+not. `$08` is also a useful game idiom: it keeps the channel DAC electrically
+enabled while holding its sample amplitude at zero. Treating it as a delayed
+fade-in changes silence into exactly the persistent noise that was reported.
+
+The fix preserves the two separate pieces of hardware behavior:
+
+1. A zero period still reloads the hidden timer as 8.
+2. Once reloaded, a zero *programmed* period returns without changing volume.
+
+This belongs in the reusable `Envelope` unit, not in channel 4, Oracle-specific
+code, the mixer, or either platform frontend. Pulse channels use the same
+envelope hardware and receive the same correction. There is no ROM-name check,
+register-value exception, audio filter, or suppression of noise samples.
+
+### Proof at the Same Oracle State
+
+Replaying the identical ROM/save/input/time state after the fix retained
+`NR42 = 08`, `NR43 = 07`, `NR52 = 8F`, and every other observed register, but
+changed `PCM34` from `F0` to `00`. In other words, the game still configured and
+enabled the channel exactly as before, while the emulated channel output now
+remains at the requested zero volume. This isolates the change to the erroneous
+hidden envelope evolution rather than accidentally disabling the APU or noise
+channel.
+
+Two focused unit tests protect both halves of the distinction. One clocks a
+zero-period, zero-volume increasing envelope for 64 envelope events and requires
+the volume to remain zero while the timer repeatedly reloads to 8. The other
+uses a nonzero period and requires the ordinary increasing envelope to advance,
+guarding against the overly broad “fix” of disabling envelope updates entirely.
+
+The broader regression checks after this change were:
+
+- the ordinary release suite: all default tests passed;
+- Blargg sound: 12/12 DMG and 12/12 CGB ROMs passed;
+- Pokémon Silver's CGB title-screen regression passed with APU enabled;
+- Link's Awakening DX's opening-dialogue regression passed with APU enabled;
+- the deterministic Oracle checkpoint produced zero channel-4 PCM output.
+
+The diagnosis used DeityGB's own state, the bundled test ROMs, and Pan Docs'
+hardware descriptions. No reference-emulator implementation was inspected or
+copied. One separate documented noise detail remains suitable for a future
+audit: NR43 clock shifts 14 and 15 stop the LFSR clock on hardware. Oracle used
+shift 0 (`NR43 = 07`) at this checkpoint, so changing that unrelated behavior
+would not have addressed this defect and was deliberately left out of the fix.
+
 ## Optional CGB Boot ROM Plumbing
 
 DeityGB historically loaded `src/dmg_boot.bin` for every cartridge, including
@@ -1718,3 +1806,324 @@ save timing, or fast-forward pacing. During TAB fast-forward the panel therefore
 describes and overlays the accelerated presentation path without becoming part
 of Game Boy emulation state. This keeps a UI concern out of CPU/MMU/PPU logic
 and makes deterministic headless tests independent of whether help is visible.
+
+## Packaged Desktop Application and ROM Library
+
+### The user-facing problem
+
+DeityGB previously behaved like a developer executable: it expected a ROM path
+on the command line and loaded boot ROM files from locations in the source
+checkout. That is convenient for tests, but it is not a finished desktop
+application. Double-clicking it without arguments simply printed usage text and
+quit, and moving the executable away from the repository separated it from
+resources it needed at runtime.
+
+The frontend now has two deliberate entry paths:
+
+1. A normal desktop launch shows the existing Fierce Deity splash until Enter,
+   opens the operating system's folder chooser, and presents a controller-
+   navigable library of ROMs found beneath that folder.
+2. A ROM path supplied as the first non-option argument preserves the direct
+   launch used by developers and automation. It retains the short timed splash
+   rather than requiring interactive confirmation.
+
+These paths converge before emulation begins. ROM loading, cartridge creation,
+boot selection, battery-save restoration, CPU/MMU/PPU/APU construction, and the
+main loop therefore remain single implementations rather than two subtly
+different emulator modes.
+
+### What belongs in the executable and what belongs beside it
+
+The GUI uses compile-time byte inclusion for the DMG boot ROM, CGB boot ROM, and
+splash artwork. The resulting executable owns immutable resources that are part
+of DeityGB itself; it does not depend on the developer's source-tree layout.
+This is the important distinction behind a relocatable application bundle.
+
+Game ROMs and cartridge state are intentionally not embedded. A selected ROM
+remains an ordinary filesystem path, and `CartridgeSave::for_rom_path` continues
+to place battery RAM and RTC state alongside that cartridge according to the
+existing persistence contract. Packaging changes resource discovery, not save
+semantics. This also means moving a ROM without its `.sav` still looks like a
+new cartridge, exactly as it did before the browser existed.
+
+Audio is enabled by default in the desktop path. Requiring the old positive
+`--apu` flag would have made a double-clicked packaged application silently run
+without sound because desktop launchers supply no development flags. A negative
+`--no-apu` diagnostic switch remains available for timing investigations and
+headless-style frontend experiments.
+
+### ROM discovery and navigation
+
+After the native folder chooser returns, the browser recursively walks the
+chosen directory, accepts extensions `.gb` and `.gbc` without case sensitivity,
+sorts relative paths case-insensitively, and displays those relative paths. A
+nested library can therefore retain folders for system, region, series, or
+personal organization without flattening duplicate filenames.
+
+Selection movement is a small pure operation using modular arithmetic. Moving
+above the first entry wraps to the last, moving below the last wraps to the
+first, and an empty library remains at selection zero without indexing. The
+pure helper and filesystem discovery are covered by unit tests, including
+nested discovery, extension filtering, deterministic ordering, and wraparound.
+
+The library accepts both the emulator's keyboard mapping and conventional UI
+keys. W/S and Up/Down move one row, Tab advances one row, A/D and Left/Right
+move ten rows, J or Enter launches, and K or Escape returns to folder selection.
+The displayed list is windowed around the current selection so large recursive
+libraries do not require drawing every path every frame.
+
+Single-row navigation has frontend-owned held-key repeat rather than relying on
+platform keyboard settings. A new direction moves immediately, pauses for 280
+milliseconds so a tap remains precise, repeats every 60 milliseconds, and
+accelerates to a 25-millisecond interval after 900 milliseconds. If a slow host
+frame crosses multiple repeat deadlines, the pure repeat controller catches up
+by several rows with a bounded step instead of making scrolling frame-rate
+dependent. Releasing or reversing the control resets the repeat state. Focused
+unit coverage pins immediate movement, initial delay, normal repeat,
+acceleration, reversal, and release.
+
+### Why the apparent 60 FPS could still run at half speed
+
+The frontend historically had two reasons to yield to the host: a real PPU
+VBlank, or a fallback after 70,224 accumulated cycles so an LCD-off program
+could not freeze the application. Treating those as interchangeable while the
+LCD was enabled allowed the fallback to fire just before the PPU's VBlank and
+the VBlank to fire again moments later. Each path incremented the displayed
+frame counter and awaited a host presentation. The overlay therefore reported
+roughly 60 events per second while only about 30 complete Game Boy LCD frames,
+and their corresponding audio cycles, advanced. The measurement was counting
+frontend yields rather than unique hardware frames.
+
+The ownership rule is now explicit: an enabled LCD is paced only by its PPU
+VBlank edge. The 70,224-cycle fallback belongs exclusively to LCD-off operation,
+where no VBlank can arrive and the frontend still needs input, save flushing,
+and window responsiveness. Focused tests pin both halves of that rule so a
+future no-VBlank safeguard cannot silently double-present active video again.
+
+A later macOS package exposed a second, independent pacing assumption. The
+updated miniquad backend synchronizes `next_frame` to the physical display. On
+a 120 Hz ProMotion panel, treating every returned host frame as permission to
+emulate another Game Boy frame made the entire machine run at almost exactly
+2x: video, music, timers, and input all advanced twice as quickly. VSync prevents
+tearing; it is not a Game Boy clock and must not own emulation speed.
+
+Frontend pacing now derives its deadline from the hardware constants: 70,224
+cycles per frame divided by 4,194,304 cycles per second, or approximately
+59.7275 emulated frames per second. When a 120/144 Hz host requests another
+refresh before that deadline, DeityGB redraws the most recent texture and polls
+input without advancing CPU, PPU, timers, RTC, or APU. Absolute deadlines avoid
+accumulating rounding drift, and a large window/compositor stall discards stale
+deadlines rather than running a long catch-up burst. Tab still emulates two
+Game Boy frames per paced host presentation, so 2x remains explicit rather than
+being an accidental property of the monitor.
+
+The native folder dialog is intentionally outside the emulated machine. It
+chooses a host resource before a cartridge is installed and has no effect on
+Game Boy input, clocks, or deterministic execution. Cancelling returns to the
+splash rather than terminating unexpectedly; closing the application still
+exits.
+
+The dialog must also be asynchronous. A synchronous macOS modal panel invoked
+from macroquad's render/event thread prevents that thread from pumping host
+events and can produce a frozen, rapidly growing process. An attempted switch
+to rfd's callback-driven AppKit panel kept the chooser responsive, but crash
+reports showed AppKit aborting in `CA::Layer::display_if_needed` while the panel
+closed. In other words, two frameworks were still trying to own one AppKit
+event and drawing lifecycle.
+
+The macOS frontend now launches the system chooser through `/usr/bin/osascript`
+on a worker thread. The native panel belongs to that short-lived helper process,
+while DeityGB continues to own and render its miniquad window. Only the selected
+POSIX directory path crosses the bounded channel between them.
+
+The first Linux package showed that “the portal is out of process” was not a
+sufficient ownership rule. The `rfd` future still lived inside macroquad's
+render coroutine. While that future was pending, DeityGB did not continuously
+submit frames; on the tested desktop the waiting prompt remained an unpresented
+black backbuffer, and returning from the chooser left the old alpha-era Linux
+window backend at the same lifecycle boundary as ROM startup. Making audio
+initialization fallible did not alter that failure, which was important negative
+evidence: the defect preceded the APU and could not be repaired in its sink.
+
+Moving Linux to external `zenity`, `kdialog`, or `yad` helpers fixed ownership,
+but it did not fix latency. Those general-purpose dialogs may enumerate remote
+mounts, query desktop metadata, and generate thumbnails whenever a directory is
+opened. That work is useful in a file manager but unnecessary when DeityGB only
+needs a directory name, and it made navigation take seconds on the target host.
+
+Linux folder selection is therefore now a small Macroquad screen owned by the
+existing frontend. It lists directories only, performs each `read_dir` on a
+worker, sorts names deterministically, and transfers the completed owned list
+over a bounded channel. The render loop remains responsive even if a mount is
+slow, and ordinary local navigation avoids thumbnail, portal, D-Bus, and second
+GUI-toolkit startup costs entirely. `[ Use this folder ]` makes selection
+explicit; W/S navigates, J or Enter opens or chooses, and K moves to the parent.
+This changes only host navigation. Cartridge discovery begins after selection
+and the Game Boy machine still does not exist until a ROM is chosen.
+
+Directory scanning likewise runs on a worker thread while the frontend renders
+a scanning message. The recursive walk uses `DirEntry::file_type` and follows
+only real directories, never symbolic links. Calling `Path::is_dir` would follow
+a symlink back into an ancestor and recurse forever in a cyclic directory tree;
+skipping symlinks gives discovery a finite ownership boundary and prevents an
+innocent library layout from exhausting memory. The frontend receives one
+completed result over a bounded channel and only then exposes selection.
+
+Linux audio initialization is fallible by design. A desktop may have no default
+ALSA device, may expose a temporarily unavailable device, or may prefer integer
+samples instead of macOS's usual floating-point format. The frontend supports
+the common `f32`, `f64`, signed 16/32-bit, and unsigned 16/32-bit formats.
+Device lookup, format lookup, stream construction, and playback return
+diagnostics instead of panicking. If host audio cannot start, the Game Boy APU
+still advances against a bounded silent sink so audio-register and timing
+behavior remain part of emulation; only physical sound output is absent.
+
+The Linux waiting path presents every frame while polling the helper result.
+This is stronger than presenting one frame and then awaiting another framework:
+window exposes, focus changes, compositor redraws, and a slow chooser can all
+happen after the first frame. The prompt therefore remains visible and the
+window remains responsive for the entire native-dialog lifetime.
+
+The frontend dependency was also stale at the most Linux-sensitive layer.
+Macroquad 0.4.0 selected miniquad 0.4.0-alpha.4; the rebuilt frontend uses
+Macroquad 0.4.13 and miniquad 0.4.6. No emulator code depends on those versions:
+they own the host window, input events, OpenGL context, and frame presentation.
+Keeping this upgrade at that boundary improves Linux lifecycle behavior without
+changing CPU, PPU, APU, mapper, or save semantics. Macroquad 0.4.13 was chosen
+instead of the newest release because it remains compatible with the project's
+Nix Rust compiler while still replacing the pre-release backend.
+
+### macOS and Linux artifacts
+
+Cargo bundle metadata supplies the application name, reverse-domain identifier,
+game category, minimum macOS version, descriptions, and icon. The original icon
+art had unusual 1254-by-1254 dimensions, which the macOS icon converter did not
+accept. A mechanically resized 512-by-512 PNG preserves the artwork while
+providing a conventional packaging source; it is not a redesigned icon.
+
+The PNG and desktop entry alone were insufficient for the running Linux app.
+Macroquad passes an `Icon` through its miniquad window configuration, but
+miniquad 0.4.6 explicitly implements that field only for Windows and macOS;
+its Linux icon path remains a TODO. Consequently, the executable contained the
+correct pixels while X11 window managers still received no `_NET_WM_ICON` and
+displayed their generic application glyph.
+
+GNOME's window tracker documents that it associates X11 windows with desktop
+applications primarily through `WM_CLASS`. That property is part of the
+window's initial identity: setting it after `XMapWindow` leaves a race in which
+GNOME may already have permanently classified the process as a generic
+window-backed application. This explained why the first attempts sometimes
+changed from a gear after a delay and sometimes never changed at all. Neither
+desktop-file cache refreshing nor relaunching through GIO repairs a missing
+class reliably once the window has been mapped.
+
+DeityGB therefore carries a narrowly patched copy of the exact miniquad 0.4.6
+version already used by Macroquad. In miniquad's existing X11 `create_window`
+path, immediately after `XCreateWindow` and before `show_window` calls
+`XMapWindow`, the backend now writes both `WM_CLASS = deitygb, DeityGB` and a
+64-pixel `_NET_WM_ICON` built from `Conf::icon`. `StartupWMClass=DeityGB` in the
+packaged desktop entry matches that class. There is no second display
+connection, title-based window search, post-map property update, XDG cache
+mutation, GIO relaunch, or timing dependency.
+
+This is a lifecycle patch to the existing window backend, not a replacement of
+Macroquad or miniquad. The splash artwork remains separate from the square
+packaged icon; window, taskbar, macOS application, and desktop-launcher icon
+paths all use `assets/deitygb-icon-512.png` as their single source. Since
+miniquad's current Linux backend is X11, the same properties are available when
+it runs through XWayland.
+
+The macOS packaging script builds `DeityGB.app`, applies a complete ad-hoc code
+signature, and zips the bundle while preserving macOS resource metadata. The
+application bundle contains the Mach-O executable, generated `.icns`, and
+`Info.plist`; boot ROMs are already part of the executable. Ad-hoc signing and
+Apple distribution signing solve different problems: the former seals the
+local artifact, while frictionless public distribution requires a paid
+Developer ID identity plus Apple's notarization service. No private signing
+credential should be committed to the repository.
+
+The Linux script produces a directory and compressed archive containing the
+release executable, Freedesktop launcher, icon, and runtime notes. System audio,
+graphics, and X11 remain distribution-provided dependencies;
+the archive is an application package, not a complete Linux operating-system
+image. The Nix development shell now declares the corresponding Linux build
+inputs while retaining the macOS frameworks conditionally.
+
+### Runtime resources must travel with the executable
+
+The first portable Linux run reached CPU construction and then reported a
+missing instruction CSV. The selected cartridge was present; the missing file
+was `src/opcodes.csv`, which the optional disassembly table had historically
+opened from either the process working directory or `CARGO_MANIFEST_DIR`.
+Both paths accidentally described a developer checkout, not an installed app.
+`CARGO_MANIFEST_DIR` is compiled as a string pointing at the build machine and
+does not package the referenced file.
+
+The opcode CSV is immutable program data, so `include_bytes!` now places it in
+the executable at compile time and the CSV reader consumes that byte slice.
+This follows the same ownership rule already used for the icon and DMG/CGB boot
+ROMs: app resources are embedded; only user-selected cartridges and generated
+saves remain external. A focused test constructs the disassembler and performs
+normal and CB-prefixed lookups, guarding the embedded table itself. Most
+importantly, CPU construction no longer performs filesystem I/O, so launching
+from a desktop icon, extracted archive, arbitrary terminal directory, or
+read-only installation has identical behavior.
+
+Linux host audio is fault-contained in a sibling `deitygb-audio` process. The
+emulator sends bounded stereo frames over a pipe and receives the negotiated
+sample rate in a one-line startup handshake. ALSA and cpal therefore no longer
+initialize inside the process that owns the window and emulated machine. A
+normal Rust error, panic, native abort, or signal in the host audio stack closes
+the pipe; DeityGB's bounded sender then drops samples and gameplay continues.
+This boundary is intentionally stronger than returning `Result`: foreign audio
+libraries can terminate a process without unwinding through Rust at all.
+
+A GitHub Actions workflow is the cross-platform release boundary. Version tags
+or manual dispatch build on real macOS and Ubuntu runners and retain both
+artifacts. This matters because successfully cross-arranging files on a Mac is
+not evidence that a Linux executable starts, links, draws, opens its portal, or
+produces audio on Linux. Each platform builds and packages itself.
+
+### Verification and maintenance boundary
+
+The ordinary release suite remains the first guard because this work should be
+frontend-only: ROM selection cannot change CPU timing, PPU boundaries, APU
+sequencing, mapper persistence, or CGB behavior. The browser-specific unit tests
+then verify deterministic host logic. Finally, artifacts require platform-level
+smoke tests: launch by double click, inspect the icon, choose a nested library,
+start both a DMG and CGB title, produce audio, create and restore a battery save,
+and verify the app no longer depends on the checkout.
+
+Future frontend features should maintain this ownership split. Immutable app
+resources belong inside the executable or bundle; user cartridges and saves
+remain user files; native dialogs and library state remain frontend concerns;
+and emulated machine behavior remains in the core. That keeps packaging and UX
+work from becoming a second source of emulator timing truth.
+
+## Link Cable: A Testable Next System
+
+A link cable does not need Pokémon gameplay to become testable. At the hardware
+boundary it is an eight-bit serial exchange: one endpoint supplies clock edges,
+both endpoints shift one outgoing bit and receive one incoming bit, and each
+requests its serial interrupt when the byte completes. That small contract can
+be tested before any two-player game is involved.
+
+The safest implementation order would be:
+
+1. Extract a serial endpoint interface from the current `SB`/`SC` behavior.
+2. Connect two Game Boy instances in one process and advance them on one shared
+   scheduler, designating internal-clock and external-clock ownership exactly.
+3. Unit-test known byte pairs for eight shifts, received bytes, transfer-bit
+   clearing, and serial interrupt requests on both machines.
+4. Test normal DMG clocking, CGB fast serial clocking, disconnect behavior, and
+   simultaneous-start arbitration.
+5. Run a purpose-built pair of tiny homebrew test ROMs in lockstep and compare
+   their memory or serial transcripts.
+6. Only then use a commercial game as an end-to-end compatibility check.
+
+For Pokémon, nobody needs to replay the opening hours for every regression.
+Existing battery-save support makes prepared `.sav` fixtures the practical
+answer: load two legally supplied cartridges with saves positioned at the Cable
+Club, connect the instances, and exercise a trade. Those saves validate the
+whole game protocol and UI, while small test ROMs remain the precise automated
+diagnostic when one bit or interrupt is wrong.
