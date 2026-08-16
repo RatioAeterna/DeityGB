@@ -1703,3 +1703,18 @@ Focused regression coverage was run with:
 ```sh
 nix develop --command cargo test --release tab_fast_forward_presents_every_second_emulated_frame
 ```
+
+The frontend also has an in-app controls reference so the keyboard mapping and
+fast-forward feature are discoverable without consulting source or external
+documentation. A small `H/F1 controls` hint remains visible during normal play.
+Pressing either H or F1 toggles a centered, dimmed help panel listing the D-pad,
+A/B, Start, Select, TAB fast-forward, and the help toggle itself. The rows live
+in one `HELP_LINES` table so the displayed labels and actions can be maintained
+without duplicating drawing calls.
+
+The help state belongs only to the host frontend. It is sampled when a frame is
+presented and does not alter joypad input, emulated clocks, framebuffer state,
+save timing, or fast-forward pacing. During TAB fast-forward the panel therefore
+describes and overlays the accelerated presentation path without becoming part
+of Game Boy emulation state. This keeps a UI concern out of CPU/MMU/PPU logic
+and makes deterministic headless tests independent of whether help is visible.

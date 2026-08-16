@@ -18,6 +18,15 @@ const FIERCE_DEITY_PNG: &[u8] = include_bytes!("../assets/fierce_deity.png");
 const SAVE_FLUSH_DEBOUNCE: Duration = Duration::from_secs(1);
 const FAST_FORWARD_FRAMES_PER_HOST_FRAME: u32 = 2;
 const AUDIO_QUEUE_CAPACITY: usize = 2_048;
+const HELP_LINES: &[(&str, &str)] = &[
+    ("W A S D", "D-pad"),
+    ("J", "A button"),
+    ("K", "B button"),
+    ("Enter", "Start"),
+    ("Left Shift", "Select"),
+    ("Tab", "Fast-forward while held"),
+    ("H / F1", "Show or hide controls"),
+];
 
 const GB_SCREEN_DIM: u32 = 23040; // 160x144
 const SCREEN_UPSCALE_FACTOR: f32 = 5.0; // gameboy screen is super tiny, so we upscale it
@@ -102,6 +111,33 @@ fn host_frames_per_present(fast_forward: bool) -> u32 {
         FAST_FORWARD_FRAMES_PER_HOST_FRAME
     } else {
         1
+    }
+}
+
+fn help_toggle_requested() -> bool {
+    is_key_pressed(KeyCode::H) || is_key_pressed(KeyCode::F1)
+}
+
+fn draw_help_overlay() {
+    let panel_width = 420.0_f32.min(screen_width() - 32.0);
+    let row_height = 30.0;
+    let padding = 22.0;
+    let title_height = 34.0;
+    let panel_height = padding * 2.0 + title_height + row_height * HELP_LINES.len() as f32;
+    let x = (screen_width() - panel_width) / 2.0;
+    let y = (screen_height() - panel_height) / 2.0;
+
+    draw_rectangle(0.0, 0.0, screen_width(), screen_height(), Color::new(0.0, 0.0, 0.0, 0.35));
+    draw_rectangle(x, y, panel_width, panel_height, Color::new(0.04, 0.05, 0.04, 0.88));
+    draw_rectangle_lines(x, y, panel_width, panel_height, 2.0, Color::new(0.76, 0.82, 0.63, 1.0));
+
+    draw_text("Controls", x + padding, y + padding + 22.0, 28.0, Color::new(0.92, 0.96, 0.78, 1.0));
+
+    let mut row_y = y + padding + title_height + 22.0;
+    for (control, action) in HELP_LINES {
+        draw_text(control, x + padding, row_y, 22.0, Color::new(0.92, 0.96, 0.78, 1.0));
+        draw_text(action, x + 170.0, row_y, 22.0, Color::new(0.84, 0.89, 0.72, 1.0));
+        row_y += row_height;
     }
 }
 
@@ -248,6 +284,7 @@ async fn main() {
     let mut lcd_transition = 0u32;
     let mut frames_since_lcd_transition = None;
     let mut last_save_flush = Instant::now();
+    let mut show_help = false;
     // Used to keep track of whether we have completed our *one* (1) per-frame render during
     // the vblank period of this frame, yet.
     loop {
@@ -317,6 +354,9 @@ async fn main() {
                 continue;
             }
             emulated_frames_since_present = 0;
+            if help_toggle_requested() {
+                show_help = !show_help;
+            }
             screen_texture.update(&screen_image);
             draw_texture_ex(
                 &screen_texture,
@@ -345,6 +385,11 @@ async fn main() {
             }
 
             draw_text(&fps_display, 10.0, 20.0, 30.0, BLACK);
+            draw_text("H/F1 controls", 10.0, screen_height() - 12.0, 20.0, BLACK);
+
+            if show_help {
+                draw_help_overlay();
+            }
 
             if capture_lcd {
                 if let Some(frame) = frames_since_lcd_transition {
