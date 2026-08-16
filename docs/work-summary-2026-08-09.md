@@ -1079,9 +1079,14 @@ continue to use `src/dmg_boot.bin`. CGB cartridges use `src/cgb_boot.bin` when a
 local dump exists, otherwise they fall back to the existing DMG compatibility
 path and the CPU's A=`11` CGB handoff shim.
 
-`src/cgb_boot.bin` is intentionally not added to git. It is a local user-provided
-boot ROM dump, similar in legal shape to cartridge ROMs. The emulator support is
-committed, but the binary dump remains outside the repository history.
+`src/cgb_boot.bin` was initially kept as a local user-provided asset while the
+loader support was developed. It is now tracked with the project so a checkout
+can take the real CGB startup path without an extra local setup step. The file is
+2304 bytes, matching the address space expected by the CGB boot mapping, and its
+SHA-256 at the time it was added is
+`3a307a41689bee99a9a32ea021bf45136906c86b2e4f06c806738398e4f92e45`.
+Treat a future binary replacement as an intentional asset update: verify its
+size and checksum, then rerun the CGB boot and rendering regressions.
 
 The MMU boot ROM buffer now covers `0000-00FF` and the CGB-only `0200-08FF`
 window while `FF50` is still zero. A write of any non-zero value to `FF50`
