@@ -1558,11 +1558,10 @@ impl MMU {
     }
 
     pub fn trigger_oam_idu_corruption_at(&mut self, address: u16, extra_cycles: u16) {
-        if !self.oam_corruption_active(address) {
+        let Some(row) = self.oam_corruption_row(address, extra_cycles) else {
             return;
-        }
+        };
 
-        let row = usize::from(((self.ppu_mode_cycles + extra_cycles) / 4).min(19));
         self.apply_oam_row_corruption(row, false);
     }
 
@@ -1571,10 +1570,9 @@ impl MMU {
     }
 
     pub fn trigger_oam_read_corruption_at(&mut self, address: u16, extra_cycles: u16) {
-        if !self.oam_corruption_active(address) {
+        let Some(row) = self.oam_corruption_row(address, extra_cycles) else {
             return;
-        }
-        let row = usize::from(((self.ppu_mode_cycles + extra_cycles) / 4).min(19));
+        };
         self.apply_oam_row_corruption(row, true);
     }
 
@@ -1583,10 +1581,9 @@ impl MMU {
     }
 
     pub fn trigger_oam_read_idu_corruption_at(&mut self, address: u16, extra_cycles: u16) {
-        if !self.oam_corruption_active(address) {
+        let Some(row) = self.oam_corruption_row(address, extra_cycles) else {
             return;
-        }
-        let row = usize::from(((self.ppu_mode_cycles + extra_cycles) / 4).min(19));
+        };
         if (4..19).contains(&row) {
             let current = 0xFE00 + row * 8;
             let previous = current - 8;
@@ -1605,11 +1602,30 @@ impl MMU {
         self.apply_oam_row_corruption(row, true);
     }
 
-    fn oam_corruption_active(&self, address: u16) -> bool {
-        !self.cgb_mode
-            && self.memory[0xFF40] & 0x80 != 0
-            && self.ppu_mode == 2
-            && (0xFE00..=0xFEFF).contains(&address)
+    fn oam_corruption_row(&self, address: u16, extra_cycles: u16) -> Option<usize> {
+        if self.cgb_mode
+            || self.memory[0xFF40] & 0x80 == 0
+            || !(0xFE00..=0xFEFF).contains(&address)
+        {
+            return None;
+        }
+
+        let row = if matches!(self.ppu_mode, 0 | 1)
+            && self.ppu_oam_early_ban
+            && self.ppu_mode_cycles >= 452
+        {
+            ((self.ppu_mode_cycles.saturating_sub(452) + extra_cycles) / 4) + 1
+        } else if self.ppu_mode == 2 {
+            let phase = self.ppu_mode_cycles + extra_cycles;
+            if phase >= 72 {
+                return None;
+            }
+            (phase / 4) + 2
+        } else {
+            return None;
+        };
+
+        Some(usize::from(row))
     }
 
     fn apply_oam_row_corruption(&mut self, row: usize, read: bool) {
@@ -1638,15 +1654,10 @@ impl MMU {
     }
 
     pub fn trigger_oam_write_corruption_at(&mut self, address: u16, extra_cycles: u16) {
-        if self.cgb_mode
-            || self.memory[0xFF40] & 0x80 == 0
-            || self.ppu_mode != 2
-            || !(0xFE00..=0xFEFF).contains(&address)
-        {
+        let Some(row) = self.oam_corruption_row(address, extra_cycles) else {
             return;
-        }
+        };
 
-        let row = usize::from(((self.ppu_mode_cycles + extra_cycles) / 4).min(19));
         if row == 0 {
             return;
         }

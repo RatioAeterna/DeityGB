@@ -363,6 +363,66 @@ must already be present, not appear later. Direct launch must create only one
 process and must not write desktop metadata into the user's XDG directories or
 invoke `gio`/`gtk-launch`.
 
+## PPU timing and DMG OAM-corruption regression gate
+
+Mooneye's acceptance tree and Blargg's `oam_bug` aggregate are complementary,
+not interchangeable. Mooneye heavily exercises visible PPU modes, STAT edges,
+LY timing, and CPU-visible bus arbitration. Blargg's OAM ROM exercises the DMG
+silicon defect in which a 16-bit increment/decrement or stack access can feed an
+OAM address into the sprite-search circuitry and corrupt an eight-byte row.
+Passing one suite does not imply passing the other. Run both whenever CPU/PPU
+clock ownership, stack timing, OAM access, STAT, LY, or mode 2 changes:
+
+```sh
+nix develop --command cargo test --release --test headless \
+  mooneye_acceptance_suite_reports_no_timeouts -- --ignored --exact --nocapture
+nix develop --command cargo test --release --test headless \
+  blargg_dmg_oam_bug_rom_passes -- --ignored --exact --nocapture
+```
+
+The CPU interpreter may advance timers and the PPU partway through an
+instruction so a video-register access occurs at its actual machine-cycle
+boundary. Those consumers need separate progress counters. A timed stack read
+can advance DIV/TIMA without receiving a PPU reference; sharing one counter
+then incorrectly tells the instruction epilogue that the PPU has already seen
+those dots. `RET` consequently reported 16 CPU cycles while advancing the PPU
+only 12. Long Blargg delay loops magnified the missing four dots into a
+scanline-phase error. The focused `ret_stack_read_advances_ppu_for_every_cpu_cycle`
+test guards the ownership rule: every reported CPU dot reaches both clock
+domains exactly once, even if their updates occur through different paths.
+
+Once complete PPU clocking was restored, several compensations from the old
+timeline became visible. Reads of `STAT`, `LY`, and OAM through `LD A,(HL)` must
+sample at the final bus machine cycle, not after the entire instruction.
+Normal-line LY changes at dot 452 in this model. Mode-0 STAT becomes active at
+the actual transfer end rather than through a four-dot early pulse. The DMG
+mode-2 source at the end of VBlank likewise belongs to the real line boundary;
+the earlier dot-452 phase is still important for OAM arbitration but must not
+invent a STAT edge. Finally, sprite-enabled mode 3 starts from the same base
+duration as the no-sprite path and then adds quantified fetch stalls; the old
+unconditional eight-dot subtraction made every sprite-bearing line too short.
+
+DMG OAM corruption has a pre-scan phase that begins at dot 452 of the preceding
+line and continues into mode 2. The first corruptible row is row 1 during that
+pre-scan phase; mode-2 dot 0 maps to row 2, subsequent rows advance every four
+dots, and corruption stops before dot 72. CGB does not use this DMG corruption
+path. The row calculation is centralized in the MMU so IDU, read, read-plus-IDU,
+and write variants share the same aperture. For a two-byte stack write, the
+second write's phase offset is relative to the already-advanced first write,
+not an absolute instruction offset.
+
+After these focused gates, run both visual references and the ordinary suite:
+
+```sh
+nix develop --command cargo test --release --test headless acid2 -- --ignored --nocapture
+nix develop --command cargo test --release
+```
+
+If audio or global clock delivery changed, also run
+`blargg_sound_core_roms_pass`. A green Mooneye result must never be reported as
+"all PPU tests pass" without the standalone Blargg OAM aggregate and Acid2
+checks.
+
 ## References
 
 - Pan Docs: memory map, boot ROM handoff, and serial `FF01`/`FF02` behavior.

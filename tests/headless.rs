@@ -1,6 +1,6 @@
 use deitygb::apu::APU;
 use deitygb::cartridge_save::CartridgeSave;
-use deitygb::cpu::CPU;
+use deitygb::cpu::{PostBootRegisters, CPU};
 use deitygb::headless::{
     default_boot_rom_path, load_file, GameBoy, HardwareModel, TestOutcome, DMG_CPU_FREQUENCY,
     DMG_FRAME_CYCLES,
@@ -103,12 +103,12 @@ fn cgb_does_not_generate_dmg_line_144_mode2_pulse() {
 }
 
 #[test]
-fn normal_scanline_ly_advances_at_dot_444() {
+fn normal_scanline_ly_advances_at_dot_452() {
     let mut mmu = MMU::new();
     let mut ppu = PPU::new();
     mmu.set_raw_byte(0xFF40, 0x80);
     mmu.set_raw_byte(0xFF45, 10);
-    ppu.apply_dmg_family_post_boot_state(0x04, 10, Some(0), Some(440), Some(10), &mut mmu);
+    ppu.apply_dmg_family_post_boot_state(0x04, 10, Some(0), Some(448), Some(10), &mut mmu);
 
     assert_eq!(mmu.get_byte(0xFF44), 10);
     assert_ne!(mmu.get_byte(0xFF41) & 0x04, 0);
@@ -163,6 +163,55 @@ fn mode2_oam_write_aperture_is_only_dot_76() {
     mmu.set_ppu_state(2, 77);
     mmu.set_byte(0xFE00, 0x44);
     assert_eq!(mmu.get_raw_byte(0xFE00), 0x33);
+}
+
+#[test]
+fn dmg_oam_corruption_begins_at_prescan_dot_452() {
+    let mut mmu = MMU::new();
+    mmu.set_raw_byte(0xFF40, 0x80);
+    mmu.set_ppu_state(0, 448);
+    mmu.set_ppu_oam_early_ban(true);
+    for offset in 0..16 {
+        mmu.set_raw_byte(0xFE00 + offset, offset as u8);
+    }
+
+    mmu.trigger_oam_idu_corruption(0xFE00);
+    assert_ne!(&mmu.memory[0xFE08..0xFE10], &mmu.memory[0xFE00..0xFE08]);
+
+    mmu.set_ppu_state(0, 452);
+    mmu.trigger_oam_idu_corruption(0xFE00);
+
+    assert_eq!(&mmu.memory[0xFE08..0xFE10], &mmu.memory[0xFE00..0xFE08]);
+}
+
+#[test]
+fn ret_stack_read_advances_ppu_for_every_cpu_cycle() {
+    let mut mmu = MMU::new();
+    let mut cpu = CPU::new();
+    let mut ppu = PPU::new();
+    mmu.set_raw_byte(0xFF40, 0x80);
+    mmu.set_raw_byte(0x0100, 0xC9);
+    mmu.set_raw_byte(0xC000, 0x00);
+    mmu.set_raw_byte(0xC001, 0x02);
+    cpu.apply_post_boot_registers(PostBootRegisters {
+        a: 0,
+        f: 0,
+        b: 0,
+        c: 0,
+        d: 0,
+        e: 0,
+        h: 0,
+        l: 0,
+        sp: 0xC000,
+        pc: 0x0100,
+    });
+    ppu.apply_dmg_family_post_boot_state(0x02, 1, Some(2), Some(64), Some(1), &mut mmu);
+
+    assert_eq!(cpu.cycle_with_ppu(&mut mmu, &mut ppu), 16);
+
+    assert_eq!(cpu.program_counter(), 0x0200);
+    assert_eq!(mmu.fetch_div(), 16);
+    assert_eq!(mmu.get_raw_byte(0xFF41) & 0x03, 3);
 }
 
 fn temp_rom_path(name: &str) -> PathBuf {
@@ -998,6 +1047,24 @@ fn blargg_cpu_instrs_completes_with_serial_result() {
         TestOutcome::Timeout,
         "serial: {}",
         String::from_utf8_lossy(&report.serial)
+    );
+}
+
+#[test]
+#[ignore = "runs bundled Blargg DMG OAM-corruption ROM"]
+fn blargg_dmg_oam_bug_rom_passes() {
+    let rom = load_file(&repo_path("src/roms/gb-test-roms/oam_bug/oam_bug.gb")).unwrap();
+    let mut gb = GameBoy::new();
+    gb.set_apu_enabled(false);
+    gb.set_force_dmg(true);
+    gb.load_rom(&rom);
+
+    let report = gb.run_until(DMG_CPU_FREQUENCY * 120);
+    assert_eq!(
+        report.outcome,
+        TestOutcome::Passed,
+        "Blargg OAM result: {:?}",
+        gb.blargg_memory_text()
     );
 }
 

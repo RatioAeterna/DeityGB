@@ -480,7 +480,6 @@ impl PPU {
         if self.get_lcdc(mmu_ref) & 0x02 == 0 {
             return base_cycles;
         }
-        let base_cycles = base_cycles - 8;
 
         let sprite_height = if self.get_lcdc(mmu_ref) & 0x04 != 0 { 16 } else { 8 };
         let ly = i16::from(self.get_ly(mmu_ref));
@@ -569,7 +568,7 @@ impl PPU {
                 >= if self.lcd_startup_line || self.lcd_startup_followup_line {
                     452
                 } else {
-                    444
+                    452
                 }
         {
             self.inc_ly(mmu_ref);
@@ -623,13 +622,6 @@ impl PPU {
             }
             Transfer => {
                 let transfer_end = 80 + self.mode3_cycles(mmu_ref);
-                if self.accumulated_cycles >= transfer_end.saturating_sub(4)
-                    && self.accumulated_cycles < transfer_end
-                    && mmu_ref.get_raw_byte(0xFF41) & 0x08 != 0
-                {
-                    self.update_stat_irq_line_with_source(true, mmu_ref);
-                    return;
-                }
                 if self.accumulated_cycles >= transfer_end {
                     self.mode = HBlank;
                     self.toggle_stat_mode(0, mmu_ref);
@@ -703,12 +695,11 @@ impl PPU {
                 if self.get_ly(mmu_ref) == 153
                     && self.accumulated_cycles >= 452
                     && self.accumulated_cycles < 456
-                    && mmu_ref.get_raw_byte(0xFF41) & 0x20 != 0
                 {
-                    self.update_stat_irq_line_with_source(true, mmu_ref);
-                    return;
+                    mmu_ref.set_ppu_oam_early_ban(true);
                 }
                 if self.accumulated_cycles >= 456 {
+                    mmu_ref.set_ppu_oam_early_ban(false);
                     self.inc_ly(mmu_ref);
                     //self.check_ly_eq_lyc(mmu_ref);
                     //self.accumulated_cycles = 0;

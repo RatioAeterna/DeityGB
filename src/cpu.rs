@@ -517,7 +517,12 @@ pub struct CPU {
         trace_enabled: bool,
 
         halt_bug_enabled: bool,
+        // Timed accesses can advance one clock domain without the other (for
+        // example, stack helpers used by the timer-only CPU path). Track each
+        // consumer independently so the instruction epilogue cannot mistake
+        // timer progress for PPU progress.
         timer_cycles_advanced: u8,
+        ppu_cycles_advanced: u8,
 
         dis : Disassembler,
 
@@ -558,6 +563,7 @@ pub struct PostBootRegisters {
                 trace_enabled: false,
                 halt_bug_enabled: false,
                 timer_cycles_advanced: 0,
+                ppu_cycles_advanced: 0,
                 dis : Disassembler::from_csv(),
         }
     }
@@ -704,14 +710,17 @@ pub struct PostBootRegisters {
         self.timed_write(mmu_ref, ppu_ref, sp as usize, (val >> 8) as u8, high_cycle);
 
         sp = sp.wrapping_sub(1);
-        mmu_ref.trigger_oam_write_corruption_at(sp, u16::from(low_cycle));
+        mmu_ref.trigger_oam_write_corruption_at(
+            sp,
+            u16::from(low_cycle.saturating_sub(high_cycle)),
+        );
         self.timed_write(mmu_ref, ppu_ref, sp as usize, (val & 0xFF) as u8, low_cycle);
 
         self.set_sp(sp);
     }
 
     // pops a word off the stack, increments sp
-    fn stack_pop(&mut self, mmu_ref : &mut mmu::MMU) -> u16 {
+    fn stack_pop(&mut self, mmu_ref: &mut mmu::MMU) -> u16 {
         self.stack_pop_at(mmu_ref, &mut None, 0, 4)
     }
 
@@ -800,9 +809,17 @@ pub struct PostBootRegisters {
             self.update_system_clocks(
                 target - self.timer_cycles_advanced,
                 mmu_ref,
-                ppu_ref.as_deref_mut(),
+                None,
             );
             self.timer_cycles_advanced = target;
+        }
+        if target > self.ppu_cycles_advanced {
+            if let Some(ppu) = ppu_ref.as_deref_mut() {
+                let ppu_cycles = target - self.ppu_cycles_advanced;
+                let peripheral_cycles = mmu_ref.peripheral_cycles(ppu_cycles);
+                ppu.cycle(peripheral_cycles, mmu_ref);
+                self.ppu_cycles_advanced = target;
+            }
         }
     }
 
@@ -916,6 +933,7 @@ pub struct PostBootRegisters {
 
     fn cycle_inner(&mut self, mmu_ref : &mut mmu::MMU, ppu_ref: &mut Option<&mut PPU>) -> u8 {
         self.timer_cycles_advanced = 0;
+        self.ppu_cycles_advanced = 0;
         if self.stop_flag {
             return 0;
         }
@@ -924,7 +942,7 @@ pub struct PostBootRegisters {
         if self.halt_flag {
             if pending_interrupts == 0 {
                 let cycles = 4;
-                self.update_system_clocks(cycles, mmu_ref, ppu_ref.as_deref_mut());
+                self.advance_timers_to(cycles, mmu_ref, ppu_ref);
                 return cycles;
             }
             self.halt_flag = false;
@@ -932,11 +950,7 @@ pub struct PostBootRegisters {
 
         if self.ime && pending_interrupts != 0 {
             let cycles = self.service_interrupt(mmu_ref, ppu_ref);
-            self.update_system_clocks(
-                cycles - self.timer_cycles_advanced,
-                mmu_ref,
-                ppu_ref.as_deref_mut(),
-            );
+            self.advance_timers_to(cycles, mmu_ref, ppu_ref);
             return cycles;
         }
 
@@ -985,11 +999,7 @@ pub struct PostBootRegisters {
             self.cgb_handoff_done = true;
         }
 
-        self.update_system_clocks(
-            cycles - self.timer_cycles_advanced,
-            mmu_ref,
-            ppu_ref.as_deref_mut(),
-        );
+        self.advance_timers_to(cycles, mmu_ref, ppu_ref);
 
         return cycles;
     }
@@ -1613,9 +1623,9 @@ pub struct PostBootRegisters {
                                     ppu_ref,
                                     addr,
                                     match addr {
-                                        0xFF41 => cycles,
-                                        0xFF44 => cycles,
-                                        0xFE00..=0xFE9F if !mmu_ref.oam_dma_active() => cycles,
+                                        0xFF41 => cycles - 4,
+                                        0xFF44 => cycles - 4,
+                                        0xFE00..=0xFE9F if !mmu_ref.oam_dma_active() => cycles - 4,
                                         _ => 0,
                                     },
                                 )

@@ -2100,6 +2100,73 @@ remain user files; native dialogs and library state remain frontend concerns;
 and emulated machine behavior remains in the core. That keeps packaging and UX
 work from becoming a second source of emulator timing truth.
 
+## Closing the Mooneye/Blargg PPU regression
+
+The 75/75 Mooneye milestone initially concealed a regression in Blargg's
+separate DMG OAM-corruption aggregate: only two of its eight component ROMs
+passed. This was not a disagreement between two arbitrary expected images. It
+exposed a clock-accounting hole at the boundary between the instruction-level
+CPU interpreter and dot-sensitive PPU behavior.
+
+DeityGB can advance hardware during an instruction. For example, a video
+register read must observe the PPU state at that read's machine cycle rather
+than the state at the instruction's beginning or end. The interpreter recorded
+how many cycles had already been delivered so its epilogue could deliver only
+the remainder. Stack-pop helpers, however, sometimes advanced timers without a
+PPU reference. The one shared progress value still increased. At the end of an
+unconditional `RET`, timers had received all 16 dots, but the PPU received only
+12 because the epilogue believed the first four had already gone everywhere.
+
+That four-dot omission was small per instruction and enormous in aggregate.
+Blargg synchronizes deliberate OAM accesses to exact sprite-search phases using
+subroutines and delay loops. Every return shortened PPU time while leaving CPU
+and timer time intact, eventually placing the corruption operation on the wrong
+row or outside the corruption aperture. The repair gives timer delivery and
+PPU delivery independent per-instruction progress counters. Each consumer can
+be updated early when an access requires it, and each independently receives
+the remaining dots before the instruction completes.
+
+Correcting the clock exposed several older offsets that had compensated for
+the missing dots:
+
+- `LD A,(HL)` now samples `STAT`, `LY`, and OAM at the final bus machine cycle,
+  four dots before instruction completion in this interpreter's convention.
+- Normal-line LY advancement moves from the compensating dot 444 to dot 452.
+- Mode-0 STAT and the VBlank-to-mode-2 transition use their real boundaries;
+  the previous early transient edges are no longer needed.
+- Sprite-enabled transfer duration no longer subtracts eight dots before adding
+  sprite fetch penalties. The subtraction was why the 105-case sprite timing
+  ROM failed immediately at its first X=0 sprite case once the clock was fixed.
+
+The OAM-corruption model itself also needed a more faithful phase map. On DMG,
+the vulnerable sprite-search circuitry begins its pre-scan at dot 452 of the
+previous line. That maps to corruption row 1. Mode-2 dot 0 maps to row 2, rows
+then advance every four dots, and the aperture closes before dot 72. All four
+corruption entry points now ask one MMU helper for that row, which prevents
+read, write, IDU, and combined read/IDU behavior from drifting apart. The CGB
+path remains excluded. The second byte of a stack push also uses a relative
+offset after the first timed write, avoiding a second advancement by an already
+consumed absolute cycle count.
+
+The regression suite now contains a named ignored aggregate for Blargg's entire
+DMG OAM ROM rather than relying on ad hoc manual execution. Focused tests pin
+the pre-scan opening and verify that a 16-cycle `RET` advances both DIV and the
+PPU by all 16 dots. The final verification result is deliberately expressed as
+multiple independent claims:
+
+- Mooneye acceptance: 75/75 passed, zero timeouts.
+- Blargg DMG OAM corruption: 8/8 component ROMs passed.
+- DMG Acid2 and CGB Acid2: both complete reference checks passed.
+- Blargg DMG/CGB sound core: complete aggregate passed.
+- Ordinary release suite: all non-ignored tests passed after updating the LY
+  boundary guard to dot 452.
+
+The maintenance lesson is as important as the individual offsets. Mooneye is a
+broad timing oracle, Blargg OAM targets a distinct DMG defect, and Acid2 checks
+rendering consequences. None subsumes the others. Future PPU completion claims
+must name and run all three boundaries, especially after any change that moves
+cycles between CPU helpers and the instruction epilogue.
+
 ## Link Cable: A Testable Next System
 
 A link cable does not need Pokémon gameplay to become testable. At the hardware
